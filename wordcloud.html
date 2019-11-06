@@ -1,0 +1,2254 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>body{background-color:white;}</style>
+<script>(function() {
+  // If window.HTMLWidgets is already defined, then use it; otherwise create a
+  // new object. This allows preceding code to set options that affect the
+  // initialization process (though none currently exist).
+  window.HTMLWidgets = window.HTMLWidgets || {};
+
+  // See if we're running in a viewer pane. If not, we're in a web browser.
+  var viewerMode = window.HTMLWidgets.viewerMode =
+      /\bviewer_pane=1\b/.test(window.location);
+
+  // See if we're running in Shiny mode. If not, it's a static document.
+  // Note that static widgets can appear in both Shiny and static modes, but
+  // obviously, Shiny widgets can only appear in Shiny apps/documents.
+  var shinyMode = window.HTMLWidgets.shinyMode =
+      typeof(window.Shiny) !== "undefined" && !!window.Shiny.outputBindings;
+
+  // We can't count on jQuery being available, so we implement our own
+  // version if necessary.
+  function querySelectorAll(scope, selector) {
+    if (typeof(jQuery) !== "undefined" && scope instanceof jQuery) {
+      return scope.find(selector);
+    }
+    if (scope.querySelectorAll) {
+      return scope.querySelectorAll(selector);
+    }
+  }
+
+  function asArray(value) {
+    if (value === null)
+      return [];
+    if ($.isArray(value))
+      return value;
+    return [value];
+  }
+
+  // Implement jQuery's extend
+  function extend(target /*, ... */) {
+    if (arguments.length == 1) {
+      return target;
+    }
+    for (var i = 1; i < arguments.length; i++) {
+      var source = arguments[i];
+      for (var prop in source) {
+        if (source.hasOwnProperty(prop)) {
+          target[prop] = source[prop];
+        }
+      }
+    }
+    return target;
+  }
+
+  // IE8 doesn't support Array.forEach.
+  function forEach(values, callback, thisArg) {
+    if (values.forEach) {
+      values.forEach(callback, thisArg);
+    } else {
+      for (var i = 0; i < values.length; i++) {
+        callback.call(thisArg, values[i], i, values);
+      }
+    }
+  }
+
+  // Replaces the specified method with the return value of funcSource.
+  //
+  // Note that funcSource should not BE the new method, it should be a function
+  // that RETURNS the new method. funcSource receives a single argument that is
+  // the overridden method, it can be called from the new method. The overridden
+  // method can be called like a regular function, it has the target permanently
+  // bound to it so "this" will work correctly.
+  function overrideMethod(target, methodName, funcSource) {
+    var superFunc = target[methodName] || function() {};
+    var superFuncBound = function() {
+      return superFunc.apply(target, arguments);
+    };
+    target[methodName] = funcSource(superFuncBound);
+  }
+
+  // Add a method to delegator that, when invoked, calls
+  // delegatee.methodName. If there is no such method on
+  // the delegatee, but there was one on delegator before
+  // delegateMethod was called, then the original version
+  // is invoked instead.
+  // For example:
+  //
+  // var a = {
+  //   method1: function() { console.log('a1'); }
+  //   method2: function() { console.log('a2'); }
+  // };
+  // var b = {
+  //   method1: function() { console.log('b1'); }
+  // };
+  // delegateMethod(a, b, "method1");
+  // delegateMethod(a, b, "method2");
+  // a.method1();
+  // a.method2();
+  //
+  // The output would be "b1", "a2".
+  function delegateMethod(delegator, delegatee, methodName) {
+    var inherited = delegator[methodName];
+    delegator[methodName] = function() {
+      var target = delegatee;
+      var method = delegatee[methodName];
+
+      // The method doesn't exist on the delegatee. Instead,
+      // call the method on the delegator, if it exists.
+      if (!method) {
+        target = delegator;
+        method = inherited;
+      }
+
+      if (method) {
+        return method.apply(target, arguments);
+      }
+    };
+  }
+
+  // Implement a vague facsimilie of jQuery's data method
+  function elementData(el, name, value) {
+    if (arguments.length == 2) {
+      return el["htmlwidget_data_" + name];
+    } else if (arguments.length == 3) {
+      el["htmlwidget_data_" + name] = value;
+      return el;
+    } else {
+      throw new Error("Wrong number of arguments for elementData: " +
+        arguments.length);
+    }
+  }
+
+  // http://stackoverflow.com/questions/3446170/escape-string-for-use-in-javascript-regex
+  function escapeRegExp(str) {
+    return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
+  }
+
+  function hasClass(el, className) {
+    var re = new RegExp("\\b" + escapeRegExp(className) + "\\b");
+    return re.test(el.className);
+  }
+
+  // elements - array (or array-like object) of HTML elements
+  // className - class name to test for
+  // include - if true, only return elements with given className;
+  //   if false, only return elements *without* given className
+  function filterByClass(elements, className, include) {
+    var results = [];
+    for (var i = 0; i < elements.length; i++) {
+      if (hasClass(elements[i], className) == include)
+        results.push(elements[i]);
+    }
+    return results;
+  }
+
+  function on(obj, eventName, func) {
+    if (obj.addEventListener) {
+      obj.addEventListener(eventName, func, false);
+    } else if (obj.attachEvent) {
+      obj.attachEvent(eventName, func);
+    }
+  }
+
+  function off(obj, eventName, func) {
+    if (obj.removeEventListener)
+      obj.removeEventListener(eventName, func, false);
+    else if (obj.detachEvent) {
+      obj.detachEvent(eventName, func);
+    }
+  }
+
+  // Translate array of values to top/right/bottom/left, as usual with
+  // the "padding" CSS property
+  // https://developer.mozilla.org/en-US/docs/Web/CSS/padding
+  function unpackPadding(value) {
+    if (typeof(value) === "number")
+      value = [value];
+    if (value.length === 1) {
+      return {top: value[0], right: value[0], bottom: value[0], left: value[0]};
+    }
+    if (value.length === 2) {
+      return {top: value[0], right: value[1], bottom: value[0], left: value[1]};
+    }
+    if (value.length === 3) {
+      return {top: value[0], right: value[1], bottom: value[2], left: value[1]};
+    }
+    if (value.length === 4) {
+      return {top: value[0], right: value[1], bottom: value[2], left: value[3]};
+    }
+  }
+
+  // Convert an unpacked padding object to a CSS value
+  function paddingToCss(paddingObj) {
+    return paddingObj.top + "px " + paddingObj.right + "px " + paddingObj.bottom + "px " + paddingObj.left + "px";
+  }
+
+  // Makes a number suitable for CSS
+  function px(x) {
+    if (typeof(x) === "number")
+      return x + "px";
+    else
+      return x;
+  }
+
+  // Retrieves runtime widget sizing information for an element.
+  // The return value is either null, or an object with fill, padding,
+  // defaultWidth, defaultHeight fields.
+  function sizingPolicy(el) {
+    var sizingEl = document.querySelector("script[data-for='" + el.id + "'][type='application/htmlwidget-sizing']");
+    if (!sizingEl)
+      return null;
+    var sp = JSON.parse(sizingEl.textContent || sizingEl.text || "{}");
+    if (viewerMode) {
+      return sp.viewer;
+    } else {
+      return sp.browser;
+    }
+  }
+
+  // @param tasks Array of strings (or falsy value, in which case no-op).
+  //   Each element must be a valid JavaScript expression that yields a
+  //   function. Or, can be an array of objects with "code" and "data"
+  //   properties; in this case, the "code" property should be a string
+  //   of JS that's an expr that yields a function, and "data" should be
+  //   an object that will be added as an additional argument when that
+  //   function is called.
+  // @param target The object that will be "this" for each function
+  //   execution.
+  // @param args Array of arguments to be passed to the functions. (The
+  //   same arguments will be passed to all functions.)
+  function evalAndRun(tasks, target, args) {
+    if (tasks) {
+      forEach(tasks, function(task) {
+        var theseArgs = args;
+        if (typeof(task) === "object") {
+          theseArgs = theseArgs.concat([task.data]);
+          task = task.code;
+        }
+        var taskFunc = tryEval(task);
+        if (typeof(taskFunc) !== "function") {
+          throw new Error("Task must be a function! Source:\n" + task);
+        }
+        taskFunc.apply(target, theseArgs);
+      });
+    }
+  }
+
+  // Attempt eval() both with and without enclosing in parentheses.
+  // Note that enclosing coerces a function declaration into
+  // an expression that eval() can parse
+  // (otherwise, a SyntaxError is thrown)
+  function tryEval(code) {
+    var result = null;
+    try {
+      result = eval(code);
+    } catch(error) {
+      if (!error instanceof SyntaxError) {
+        throw error;
+      }
+      try {
+        result = eval("(" + code + ")");
+      } catch(e) {
+        if (e instanceof SyntaxError) {
+          throw error;
+        } else {
+          throw e;
+        }
+      }
+    }
+    return result;
+  }
+
+  function initSizing(el) {
+    var sizing = sizingPolicy(el);
+    if (!sizing)
+      return;
+
+    var cel = document.getElementById("htmlwidget_container");
+    if (!cel)
+      return;
+
+    if (typeof(sizing.padding) !== "undefined") {
+      document.body.style.margin = "0";
+      document.body.style.padding = paddingToCss(unpackPadding(sizing.padding));
+    }
+
+    if (sizing.fill) {
+      document.body.style.overflow = "hidden";
+      document.body.style.width = "100%";
+      document.body.style.height = "100%";
+      document.documentElement.style.width = "100%";
+      document.documentElement.style.height = "100%";
+      if (cel) {
+        cel.style.position = "absolute";
+        var pad = unpackPadding(sizing.padding);
+        cel.style.top = pad.top + "px";
+        cel.style.right = pad.right + "px";
+        cel.style.bottom = pad.bottom + "px";
+        cel.style.left = pad.left + "px";
+        el.style.width = "100%";
+        el.style.height = "100%";
+      }
+
+      return {
+        getWidth: function() { return cel.offsetWidth; },
+        getHeight: function() { return cel.offsetHeight; }
+      };
+
+    } else {
+      el.style.width = px(sizing.width);
+      el.style.height = px(sizing.height);
+
+      return {
+        getWidth: function() { return el.offsetWidth; },
+        getHeight: function() { return el.offsetHeight; }
+      };
+    }
+  }
+
+  // Default implementations for methods
+  var defaults = {
+    find: function(scope) {
+      return querySelectorAll(scope, "." + this.name);
+    },
+    renderError: function(el, err) {
+      var $el = $(el);
+
+      this.clearError(el);
+
+      // Add all these error classes, as Shiny does
+      var errClass = "shiny-output-error";
+      if (err.type !== null) {
+        // use the classes of the error condition as CSS class names
+        errClass = errClass + " " + $.map(asArray(err.type), function(type) {
+          return errClass + "-" + type;
+        }).join(" ");
+      }
+      errClass = errClass + " htmlwidgets-error";
+
+      // Is el inline or block? If inline or inline-block, just display:none it
+      // and add an inline error.
+      var display = $el.css("display");
+      $el.data("restore-display-mode", display);
+
+      if (display === "inline" || display === "inline-block") {
+        $el.hide();
+        if (err.message !== "") {
+          var errorSpan = $("<span>").addClass(errClass);
+          errorSpan.text(err.message);
+          $el.after(errorSpan);
+        }
+      } else if (display === "block") {
+        // If block, add an error just after the el, set visibility:none on the
+        // el, and position the error to be on top of the el.
+        // Mark it with a unique ID and CSS class so we can remove it later.
+        $el.css("visibility", "hidden");
+        if (err.message !== "") {
+          var errorDiv = $("<div>").addClass(errClass).css("position", "absolute")
+            .css("top", el.offsetTop)
+            .css("left", el.offsetLeft)
+            // setting width can push out the page size, forcing otherwise
+            // unnecessary scrollbars to appear and making it impossible for
+            // the element to shrink; so use max-width instead
+            .css("maxWidth", el.offsetWidth)
+            .css("height", el.offsetHeight);
+          errorDiv.text(err.message);
+          $el.after(errorDiv);
+
+          // Really dumb way to keep the size/position of the error in sync with
+          // the parent element as the window is resized or whatever.
+          var intId = setInterval(function() {
+            if (!errorDiv[0].parentElement) {
+              clearInterval(intId);
+              return;
+            }
+            errorDiv
+              .css("top", el.offsetTop)
+              .css("left", el.offsetLeft)
+              .css("maxWidth", el.offsetWidth)
+              .css("height", el.offsetHeight);
+          }, 500);
+        }
+      }
+    },
+    clearError: function(el) {
+      var $el = $(el);
+      var display = $el.data("restore-display-mode");
+      $el.data("restore-display-mode", null);
+
+      if (display === "inline" || display === "inline-block") {
+        if (display)
+          $el.css("display", display);
+        $(el.nextSibling).filter(".htmlwidgets-error").remove();
+      } else if (display === "block"){
+        $el.css("visibility", "inherit");
+        $(el.nextSibling).filter(".htmlwidgets-error").remove();
+      }
+    },
+    sizing: {}
+  };
+
+  // Called by widget bindings to register a new type of widget. The definition
+  // object can contain the following properties:
+  // - name (required) - A string indicating the binding name, which will be
+  //   used by default as the CSS classname to look for.
+  // - initialize (optional) - A function(el) that will be called once per
+  //   widget element; if a value is returned, it will be passed as the third
+  //   value to renderValue.
+  // - renderValue (required) - A function(el, data, initValue) that will be
+  //   called with data. Static contexts will cause this to be called once per
+  //   element; Shiny apps will cause this to be called multiple times per
+  //   element, as the data changes.
+  window.HTMLWidgets.widget = function(definition) {
+    if (!definition.name) {
+      throw new Error("Widget must have a name");
+    }
+    if (!definition.type) {
+      throw new Error("Widget must have a type");
+    }
+    // Currently we only support output widgets
+    if (definition.type !== "output") {
+      throw new Error("Unrecognized widget type '" + definition.type + "'");
+    }
+    // TODO: Verify that .name is a valid CSS classname
+
+    // Support new-style instance-bound definitions. Old-style class-bound
+    // definitions have one widget "object" per widget per type/class of
+    // widget; the renderValue and resize methods on such widget objects
+    // take el and instance arguments, because the widget object can't
+    // store them. New-style instance-bound definitions have one widget
+    // object per widget instance; the definition that's passed in doesn't
+    // provide renderValue or resize methods at all, just the single method
+    //   factory(el, width, height)
+    // which returns an object that has renderValue(x) and resize(w, h).
+    // This enables a far more natural programming style for the widget
+    // author, who can store per-instance state using either OO-style
+    // instance fields or functional-style closure variables (I guess this
+    // is in contrast to what can only be called C-style pseudo-OO which is
+    // what we required before).
+    if (definition.factory) {
+      definition = createLegacyDefinitionAdapter(definition);
+    }
+
+    if (!definition.renderValue) {
+      throw new Error("Widget must have a renderValue function");
+    }
+
+    // For static rendering (non-Shiny), use a simple widget registration
+    // scheme. We also use this scheme for Shiny apps/documents that also
+    // contain static widgets.
+    window.HTMLWidgets.widgets = window.HTMLWidgets.widgets || [];
+    // Merge defaults into the definition; don't mutate the original definition.
+    var staticBinding = extend({}, defaults, definition);
+    overrideMethod(staticBinding, "find", function(superfunc) {
+      return function(scope) {
+        var results = superfunc(scope);
+        // Filter out Shiny outputs, we only want the static kind
+        return filterByClass(results, "html-widget-output", false);
+      };
+    });
+    window.HTMLWidgets.widgets.push(staticBinding);
+
+    if (shinyMode) {
+      // Shiny is running. Register the definition with an output binding.
+      // The definition itself will not be the output binding, instead
+      // we will make an output binding object that delegates to the
+      // definition. This is because we foolishly used the same method
+      // name (renderValue) for htmlwidgets definition and Shiny bindings
+      // but they actually have quite different semantics (the Shiny
+      // bindings receive data that includes lots of metadata that it
+      // strips off before calling htmlwidgets renderValue). We can't
+      // just ignore the difference because in some widgets it's helpful
+      // to call this.renderValue() from inside of resize(), and if
+      // we're not delegating, then that call will go to the Shiny
+      // version instead of the htmlwidgets version.
+
+      // Merge defaults with definition, without mutating either.
+      var bindingDef = extend({}, defaults, definition);
+
+      // This object will be our actual Shiny binding.
+      var shinyBinding = new Shiny.OutputBinding();
+
+      // With a few exceptions, we'll want to simply use the bindingDef's
+      // version of methods if they are available, otherwise fall back to
+      // Shiny's defaults. NOTE: If Shiny's output bindings gain additional
+      // methods in the future, and we want them to be overrideable by
+      // HTMLWidget binding definitions, then we'll need to add them to this
+      // list.
+      delegateMethod(shinyBinding, bindingDef, "getId");
+      delegateMethod(shinyBinding, bindingDef, "onValueChange");
+      delegateMethod(shinyBinding, bindingDef, "onValueError");
+      delegateMethod(shinyBinding, bindingDef, "renderError");
+      delegateMethod(shinyBinding, bindingDef, "clearError");
+      delegateMethod(shinyBinding, bindingDef, "showProgress");
+
+      // The find, renderValue, and resize are handled differently, because we
+      // want to actually decorate the behavior of the bindingDef methods.
+
+      shinyBinding.find = function(scope) {
+        var results = bindingDef.find(scope);
+
+        // Only return elements that are Shiny outputs, not static ones
+        var dynamicResults = results.filter(".html-widget-output");
+
+        // It's possible that whatever caused Shiny to think there might be
+        // new dynamic outputs, also caused there to be new static outputs.
+        // Since there might be lots of different htmlwidgets bindings, we
+        // schedule execution for later--no need to staticRender multiple
+        // times.
+        if (results.length !== dynamicResults.length)
+          scheduleStaticRender();
+
+        return dynamicResults;
+      };
+
+      // Wrap renderValue to handle initialization, which unfortunately isn't
+      // supported natively by Shiny at the time of this writing.
+
+      shinyBinding.renderValue = function(el, data) {
+        Shiny.renderDependencies(data.deps);
+        // Resolve strings marked as javascript literals to objects
+        if (!(data.evals instanceof Array)) data.evals = [data.evals];
+        for (var i = 0; data.evals && i < data.evals.length; i++) {
+          window.HTMLWidgets.evaluateStringMember(data.x, data.evals[i]);
+        }
+        if (!bindingDef.renderOnNullValue) {
+          if (data.x === null) {
+            el.style.visibility = "hidden";
+            return;
+          } else {
+            el.style.visibility = "inherit";
+          }
+        }
+        if (!elementData(el, "initialized")) {
+          initSizing(el);
+
+          elementData(el, "initialized", true);
+          if (bindingDef.initialize) {
+            var result = bindingDef.initialize(el, el.offsetWidth,
+              el.offsetHeight);
+            elementData(el, "init_result", result);
+          }
+        }
+        bindingDef.renderValue(el, data.x, elementData(el, "init_result"));
+        evalAndRun(data.jsHooks.render, elementData(el, "init_result"), [el, data.x]);
+      };
+
+      // Only override resize if bindingDef implements it
+      if (bindingDef.resize) {
+        shinyBinding.resize = function(el, width, height) {
+          // Shiny can call resize before initialize/renderValue have been
+          // called, which doesn't make sense for widgets.
+          if (elementData(el, "initialized")) {
+            bindingDef.resize(el, width, height, elementData(el, "init_result"));
+          }
+        };
+      }
+
+      Shiny.outputBindings.register(shinyBinding, bindingDef.name);
+    }
+  };
+
+  var scheduleStaticRenderTimerId = null;
+  function scheduleStaticRender() {
+    if (!scheduleStaticRenderTimerId) {
+      scheduleStaticRenderTimerId = setTimeout(function() {
+        scheduleStaticRenderTimerId = null;
+        window.HTMLWidgets.staticRender();
+      }, 1);
+    }
+  }
+
+  // Render static widgets after the document finishes loading
+  // Statically render all elements that are of this widget's class
+  window.HTMLWidgets.staticRender = function() {
+    var bindings = window.HTMLWidgets.widgets || [];
+    forEach(bindings, function(binding) {
+      var matches = binding.find(document.documentElement);
+      forEach(matches, function(el) {
+        var sizeObj = initSizing(el, binding);
+
+        if (hasClass(el, "html-widget-static-bound"))
+          return;
+        el.className = el.className + " html-widget-static-bound";
+
+        var initResult;
+        if (binding.initialize) {
+          initResult = binding.initialize(el,
+            sizeObj ? sizeObj.getWidth() : el.offsetWidth,
+            sizeObj ? sizeObj.getHeight() : el.offsetHeight
+          );
+          elementData(el, "init_result", initResult);
+        }
+
+        if (binding.resize) {
+          var lastSize = {
+            w: sizeObj ? sizeObj.getWidth() : el.offsetWidth,
+            h: sizeObj ? sizeObj.getHeight() : el.offsetHeight
+          };
+          var resizeHandler = function(e) {
+            var size = {
+              w: sizeObj ? sizeObj.getWidth() : el.offsetWidth,
+              h: sizeObj ? sizeObj.getHeight() : el.offsetHeight
+            };
+            if (size.w === 0 && size.h === 0)
+              return;
+            if (size.w === lastSize.w && size.h === lastSize.h)
+              return;
+            lastSize = size;
+            binding.resize(el, size.w, size.h, initResult);
+          };
+
+          on(window, "resize", resizeHandler);
+
+          // This is needed for cases where we're running in a Shiny
+          // app, but the widget itself is not a Shiny output, but
+          // rather a simple static widget. One example of this is
+          // an rmarkdown document that has runtime:shiny and widget
+          // that isn't in a render function. Shiny only knows to
+          // call resize handlers for Shiny outputs, not for static
+          // widgets, so we do it ourselves.
+          if (window.jQuery) {
+            window.jQuery(document).on(
+              "shown.htmlwidgets shown.bs.tab.htmlwidgets shown.bs.collapse.htmlwidgets",
+              resizeHandler
+            );
+            window.jQuery(document).on(
+              "hidden.htmlwidgets hidden.bs.tab.htmlwidgets hidden.bs.collapse.htmlwidgets",
+              resizeHandler
+            );
+          }
+
+          // This is needed for the specific case of ioslides, which
+          // flips slides between display:none and display:block.
+          // Ideally we would not have to have ioslide-specific code
+          // here, but rather have ioslides raise a generic event,
+          // but the rmarkdown package just went to CRAN so the
+          // window to getting that fixed may be long.
+          if (window.addEventListener) {
+            // It's OK to limit this to window.addEventListener
+            // browsers because ioslides itself only supports
+            // such browsers.
+            on(document, "slideenter", resizeHandler);
+            on(document, "slideleave", resizeHandler);
+          }
+        }
+
+        var scriptData = document.querySelector("script[data-for='" + el.id + "'][type='application/json']");
+        if (scriptData) {
+          var data = JSON.parse(scriptData.textContent || scriptData.text);
+          // Resolve strings marked as javascript literals to objects
+          if (!(data.evals instanceof Array)) data.evals = [data.evals];
+          for (var k = 0; data.evals && k < data.evals.length; k++) {
+            window.HTMLWidgets.evaluateStringMember(data.x, data.evals[k]);
+          }
+          binding.renderValue(el, data.x, initResult);
+          evalAndRun(data.jsHooks.render, initResult, [el, data.x]);
+        }
+      });
+    });
+
+    invokePostRenderHandlers();
+  }
+
+
+  function has_jQuery3() {
+    if (!window.jQuery) {
+      return false;
+    }
+    var $version = window.jQuery.fn.jquery;
+    var $major_version = parseInt($version.split(".")[0]);
+    return $major_version >= 3;
+  }
+
+  /*
+  / Shiny 1.4 bumped jQuery from 1.x to 3.x which means jQuery's
+  / on-ready handler (i.e., $(fn)) is now asyncronous (i.e., it now
+  / really means $(setTimeout(fn)).
+  / https://jquery.com/upgrade-guide/3.0/#breaking-change-document-ready-handlers-are-now-asynchronous
+  /
+  / Since Shiny uses $() to schedule initShiny, shiny>=1.4 calls initShiny
+  / one tick later than it did before, which means staticRender() is
+  / called renderValue() earlier than (advanced) widget authors might be expecting.
+  / https://github.com/rstudio/shiny/issues/2630
+  /
+  / For a concrete example, leaflet has some methods (e.g., updateBounds)
+  / which reference Shiny methods registered in initShiny (e.g., setInputValue).
+  / Since leaflet is privy to this life-cycle, it knows to use setTimeout() to
+  / delay execution of those methods (until Shiny methods are ready)
+  / https://github.com/rstudio/leaflet/blob/18ec981/javascript/src/index.js#L266-L268
+  /
+  / Ideally widget authors wouldn't need to use this setTimeout() hack that
+  / leaflet uses to call Shiny methods on a staticRender(). In the long run,
+  / the logic initShiny should be broken up so that method registration happens
+  / right away, but binding happens later.
+  */
+  function maybeStaticRenderLater() {
+    if (shinyMode && has_jQuery3()) {
+      window.jQuery(window.HTMLWidgets.staticRender);
+    } else {
+      window.HTMLWidgets.staticRender();
+    }
+  }
+
+  if (document.addEventListener) {
+    document.addEventListener("DOMContentLoaded", function() {
+      document.removeEventListener("DOMContentLoaded", arguments.callee, false);
+      maybeStaticRenderLater();
+    }, false);
+  } else if (document.attachEvent) {
+    document.attachEvent("onreadystatechange", function() {
+      if (document.readyState === "complete") {
+        document.detachEvent("onreadystatechange", arguments.callee);
+        maybeStaticRenderLater();
+      }
+    });
+  }
+
+
+  window.HTMLWidgets.getAttachmentUrl = function(depname, key) {
+    // If no key, default to the first item
+    if (typeof(key) === "undefined")
+      key = 1;
+
+    var link = document.getElementById(depname + "-" + key + "-attachment");
+    if (!link) {
+      throw new Error("Attachment " + depname + "/" + key + " not found in document");
+    }
+    return link.getAttribute("href");
+  };
+
+  window.HTMLWidgets.dataframeToD3 = function(df) {
+    var names = [];
+    var length;
+    for (var name in df) {
+        if (df.hasOwnProperty(name))
+            names.push(name);
+        if (typeof(df[name]) !== "object" || typeof(df[name].length) === "undefined") {
+            throw new Error("All fields must be arrays");
+        } else if (typeof(length) !== "undefined" && length !== df[name].length) {
+            throw new Error("All fields must be arrays of the same length");
+        }
+        length = df[name].length;
+    }
+    var results = [];
+    var item;
+    for (var row = 0; row < length; row++) {
+        item = {};
+        for (var col = 0; col < names.length; col++) {
+            item[names[col]] = df[names[col]][row];
+        }
+        results.push(item);
+    }
+    return results;
+  };
+
+  window.HTMLWidgets.transposeArray2D = function(array) {
+      if (array.length === 0) return array;
+      var newArray = array[0].map(function(col, i) {
+          return array.map(function(row) {
+              return row[i]
+          })
+      });
+      return newArray;
+  };
+  // Split value at splitChar, but allow splitChar to be escaped
+  // using escapeChar. Any other characters escaped by escapeChar
+  // will be included as usual (including escapeChar itself).
+  function splitWithEscape(value, splitChar, escapeChar) {
+    var results = [];
+    var escapeMode = false;
+    var currentResult = "";
+    for (var pos = 0; pos < value.length; pos++) {
+      if (!escapeMode) {
+        if (value[pos] === splitChar) {
+          results.push(currentResult);
+          currentResult = "";
+        } else if (value[pos] === escapeChar) {
+          escapeMode = true;
+        } else {
+          currentResult += value[pos];
+        }
+      } else {
+        currentResult += value[pos];
+        escapeMode = false;
+      }
+    }
+    if (currentResult !== "") {
+      results.push(currentResult);
+    }
+    return results;
+  }
+  // Function authored by Yihui/JJ Allaire
+  window.HTMLWidgets.evaluateStringMember = function(o, member) {
+    var parts = splitWithEscape(member, '.', '\\');
+    for (var i = 0, l = parts.length; i < l; i++) {
+      var part = parts[i];
+      // part may be a character or 'numeric' member name
+      if (o !== null && typeof o === "object" && part in o) {
+        if (i == (l - 1)) { // if we are at the end of the line then evalulate
+          if (typeof o[part] === "string")
+            o[part] = tryEval(o[part]);
+        } else { // otherwise continue to next embedded object
+          o = o[part];
+        }
+      }
+    }
+  };
+
+  // Retrieve the HTMLWidget instance (i.e. the return value of an
+  // HTMLWidget binding's initialize() or factory() function)
+  // associated with an element, or null if none.
+  window.HTMLWidgets.getInstance = function(el) {
+    return elementData(el, "init_result");
+  };
+
+  // Finds the first element in the scope that matches the selector,
+  // and returns the HTMLWidget instance (i.e. the return value of
+  // an HTMLWidget binding's initialize() or factory() function)
+  // associated with that element, if any. If no element matches the
+  // selector, or the first matching element has no HTMLWidget
+  // instance associated with it, then null is returned.
+  //
+  // The scope argument is optional, and defaults to window.document.
+  window.HTMLWidgets.find = function(scope, selector) {
+    if (arguments.length == 1) {
+      selector = scope;
+      scope = document;
+    }
+
+    var el = scope.querySelector(selector);
+    if (el === null) {
+      return null;
+    } else {
+      return window.HTMLWidgets.getInstance(el);
+    }
+  };
+
+  // Finds all elements in the scope that match the selector, and
+  // returns the HTMLWidget instances (i.e. the return values of
+  // an HTMLWidget binding's initialize() or factory() function)
+  // associated with the elements, in an array. If elements that
+  // match the selector don't have an associated HTMLWidget
+  // instance, the returned array will contain nulls.
+  //
+  // The scope argument is optional, and defaults to window.document.
+  window.HTMLWidgets.findAll = function(scope, selector) {
+    if (arguments.length == 1) {
+      selector = scope;
+      scope = document;
+    }
+
+    var nodes = scope.querySelectorAll(selector);
+    var results = [];
+    for (var i = 0; i < nodes.length; i++) {
+      results.push(window.HTMLWidgets.getInstance(nodes[i]));
+    }
+    return results;
+  };
+
+  var postRenderHandlers = [];
+  function invokePostRenderHandlers() {
+    while (postRenderHandlers.length) {
+      var handler = postRenderHandlers.shift();
+      if (handler) {
+        handler();
+      }
+    }
+  }
+
+  // Register the given callback function to be invoked after the
+  // next time static widgets are rendered.
+  window.HTMLWidgets.addPostRenderHandler = function(callback) {
+    postRenderHandlers.push(callback);
+  };
+
+  // Takes a new-style instance-bound definition, and returns an
+  // old-style class-bound definition. This saves us from having
+  // to rewrite all the logic in this file to accomodate both
+  // types of definitions.
+  function createLegacyDefinitionAdapter(defn) {
+    var result = {
+      name: defn.name,
+      type: defn.type,
+      initialize: function(el, width, height) {
+        return defn.factory(el, width, height);
+      },
+      renderValue: function(el, x, instance) {
+        return instance.renderValue(x);
+      },
+      resize: function(el, width, height, instance) {
+        return instance.resize(width, height);
+      }
+    };
+
+    if (defn.find)
+      result.find = defn.find;
+    if (defn.renderError)
+      result.renderError = defn.renderError;
+    if (defn.clearError)
+      result.clearError = defn.clearError;
+
+    return result;
+  }
+})();
+
+</script>
+<style type="text/css">#wcLabel {position: absolute;border: 2px solid #fff;box-shadow: 0 0 4px 0 #008;padding: 2px;pointer-events: none; }#wcSpan {position: absolute;top: 100%;left: 0;background-color: rgba(255, 255, 255, 0.8);color: #333;margin-top: 6px;padding: 0 0.5em;border-radius: 0.5em;white-space: nowrap; }</style>
+<script>/*!
+ * wordcloud2.js
+ * http://timdream.org/wordcloud2.js/
+ *
+ * Copyright 2011 - 2013 Tim Chien
+ * Released under the MIT license
+ */
+
+'use strict';
+
+// setImmediate
+if (!window.setImmediate) {
+  window.setImmediate = (function setupSetImmediate() {
+    return window.msSetImmediate ||
+    window.webkitSetImmediate ||
+    window.mozSetImmediate ||
+    window.oSetImmediate ||
+    (function setupSetZeroTimeout() {
+      if (!window.postMessage || !window.addEventListener) {
+        return null;
+      }
+
+      var callbacks = [undefined];
+      var message = 'zero-timeout-message';
+
+      // Like setTimeout, but only takes a function argument.  There's
+      // no time argument (always zero) and no arguments (you have to
+      // use a closure).
+      var setZeroTimeout = function setZeroTimeout(callback) {
+        var id = callbacks.length;
+        callbacks.push(callback);
+        window.postMessage(message + id.toString(36), '*');
+
+        return id;
+      };
+
+      window.addEventListener('message', function setZeroTimeoutMessage(evt) {
+        // Skipping checking event source, retarded IE confused this window
+        // object with another in the presence of iframe
+        if (typeof evt.data !== 'string' ||
+            evt.data.substr(0, message.length) !== message/* ||
+            evt.source !== window */) {
+          return;
+        }
+
+        evt.stopImmediatePropagation();
+
+        var id = parseInt(evt.data.substr(message.length), 36);
+        if (!callbacks[id]) {
+          return;
+        }
+
+        callbacks[id]();
+        callbacks[id] = undefined;
+      }, true);
+
+      /* specify clearImmediate() here since we need the scope */
+      window.clearImmediate = function clearZeroTimeout(id) {
+        if (!callbacks[id]) {
+          return;
+        }
+
+        callbacks[id] = undefined;
+      };
+
+      return setZeroTimeout;
+    })() ||
+    // fallback
+    function setImmediateFallback(fn) {
+      window.setTimeout(fn, 0);
+    };
+  })();
+}
+
+if (!window.clearImmediate) {
+  window.clearImmediate = (function setupClearImmediate() {
+    return window.msClearImmediate ||
+    window.webkitClearImmediate ||
+    window.mozClearImmediate ||
+    window.oClearImmediate ||
+    // "clearZeroTimeout" is implement on the previous block ||
+    // fallback
+    function clearImmediateFallback(timer) {
+      window.clearTimeout(timer);
+    };
+  })();
+}
+
+(function(global) {
+
+  // Check if WordCloud can run on this browser
+  var isSupported = (function isSupported() {
+    var canvas = document.createElement('canvas');
+    if (!canvas || !canvas.getContext) {
+      return false;
+    }
+
+    var ctx = canvas.getContext('2d');
+    if (!ctx.getImageData) {
+      return false;
+    }
+    if (!ctx.fillText) {
+      return false;
+    }
+
+    if (!Array.prototype.some) {
+      return false;
+    }
+    if (!Array.prototype.push) {
+      return false;
+    }
+
+    return true;
+  }());
+
+  // Find out if the browser impose minium font size by
+  // drawing small texts on a canvas and measure it's width.
+  var minFontSize = (function getMinFontSize() {
+    if (!isSupported) {
+      return;
+    }
+
+    var ctx = document.createElement('canvas').getContext('2d');
+
+    // start from 20
+    var size = 20;
+
+    // two sizes to measure
+    var hanWidth, mWidth;
+
+    while (size) {
+      ctx.font = size.toString(10) + 'px sans-serif';
+      if ((ctx.measureText('\uFF37').width === hanWidth) &&
+          (ctx.measureText('m').width) === mWidth) {
+        return (size + 1);
+      }
+
+      hanWidth = ctx.measureText('\uFF37').width;
+      mWidth = ctx.measureText('m').width;
+
+      size--;
+    }
+
+    return 0;
+  })();
+
+  // Based on http://jsfromhell.com/array/shuffle
+  var shuffleArray = function shuffleArray(arr) {
+    for (var j, x, i = arr.length; i;
+      j = Math.floor(Math.random() * i),
+      x = arr[--i], arr[i] = arr[j],
+      arr[j] = x) {}
+    return arr;
+  };
+
+  var WordCloud = function WordCloud(elements, options) {
+    if (!isSupported) {
+      return;
+    }
+
+    if (!Array.isArray(elements)) {
+      elements = [elements];
+    }
+
+    elements.forEach(function(el, i) {
+      if (typeof el === 'string') {
+        elements[i] = document.getElementById(el);
+        if (!elements[i]) {
+          throw 'The element id specified is not found.';
+        }
+      } else if (!el.tagName && !el.appendChild) {
+        throw 'You must pass valid HTML elements, or ID of the element.';
+      }
+    });
+
+    /* Default values to be overwritten by options object */
+    var settings = {
+      list: [],
+      fontFamily: '"Trebuchet MS", "Heiti TC", "微軟正黑體", ' +
+                  '"Arial Unicode MS", "Droid Fallback Sans", sans-serif',
+      fontWeight: 'normal',
+      color: 'random-dark',
+      minSize: 0, // 0 to disable
+      weightFactor: 1,
+      clearCanvas: true,
+      backgroundColor: '#fff',  // opaque white = rgba(255, 255, 255, 1)
+
+      gridSize: 8,
+      origin: null,
+
+      drawMask: false,
+      maskColor: 'rgba(255,0,0,0.3)',
+      maskGapWidth: 0.3,
+
+      wait: 0,
+      abortThreshold: 0, // disabled
+      abort: function noop() {},
+
+      minRotation: - Math.PI / 2,
+      maxRotation: Math.PI / 2,
+
+      shuffle: true,
+      rotateRatio: 0.1,
+
+      shape: 'circle',
+      ellipticity: 0.65,
+
+      classes: null,
+
+      hover: null,
+      click: null
+    };
+
+    if (options) {
+      for (var key in options) {
+        if (key in settings) {
+          settings[key] = options[key];
+        }
+      }
+    }
+
+    /* Convert weightFactor into a function */
+    if (typeof settings.weightFactor !== 'function') {
+      var factor = settings.weightFactor;
+      settings.weightFactor = function weightFactor(pt) {
+        return pt * factor; //in px
+      };
+    }
+
+    /* Convert shape into a function */
+    if (typeof settings.shape !== 'function') {
+      switch (settings.shape) {
+        case 'circle':
+        /* falls through */
+        default:
+          // 'circle' is the default and a shortcut in the code loop.
+          settings.shape = 'circle';
+          break;
+
+        case 'cardioid':
+          settings.shape = function shapeCardioid(theta) {
+            return 1 - Math.sin(theta);
+          };
+          break;
+
+        /*
+
+        To work out an X-gon, one has to calculate "m",
+        where 1/(cos(2*PI/X)+m*sin(2*PI/X)) = 1/(cos(0)+m*sin(0))
+        http://www.wolframalpha.com/input/?i=1%2F%28cos%282*PI%2FX%29%2Bm*sin%28
+        2*PI%2FX%29%29+%3D+1%2F%28cos%280%29%2Bm*sin%280%29%29
+
+        Copy the solution into polar equation r = 1/(cos(t') + m*sin(t'))
+        where t' equals to mod(t, 2PI/X);
+
+        */
+
+        case 'diamond':
+        case 'square':
+          // http://www.wolframalpha.com/input/?i=plot+r+%3D+1%2F%28cos%28mod+
+          // %28t%2C+PI%2F2%29%29%2Bsin%28mod+%28t%2C+PI%2F2%29%29%29%2C+t+%3D
+          // +0+..+2*PI
+          settings.shape = function shapeSquare(theta) {
+            var thetaPrime = theta % (2 * Math.PI / 4);
+            return 1 / (Math.cos(thetaPrime) + Math.sin(thetaPrime));
+          };
+          break;
+
+        case 'triangle-forward':
+          // http://www.wolframalpha.com/input/?i=plot+r+%3D+1%2F%28cos%28mod+
+          // %28t%2C+2*PI%2F3%29%29%2Bsqrt%283%29sin%28mod+%28t%2C+2*PI%2F3%29
+          // %29%29%2C+t+%3D+0+..+2*PI
+          settings.shape = function shapeTriangle(theta) {
+            var thetaPrime = theta % (2 * Math.PI / 3);
+            return 1 / (Math.cos(thetaPrime) +
+                        Math.sqrt(3) * Math.sin(thetaPrime));
+          };
+          break;
+
+        case 'triangle':
+        case 'triangle-upright':
+          settings.shape = function shapeTriangle(theta) {
+            var thetaPrime = (theta + Math.PI * 3 / 2) % (2 * Math.PI / 3);
+            return 1 / (Math.cos(thetaPrime) +
+                        Math.sqrt(3) * Math.sin(thetaPrime));
+          };
+          break;
+
+        case 'pentagon':
+          settings.shape = function shapePentagon(theta) {
+            var thetaPrime = (theta + 0.955) % (2 * Math.PI / 5);
+            return 1 / (Math.cos(thetaPrime) +
+                        0.726543 * Math.sin(thetaPrime));
+          };
+          break;
+
+        case 'star':
+          settings.shape = function shapeStar(theta) {
+            var thetaPrime = (theta + 0.955) % (2 * Math.PI / 10);
+            if ((theta + 0.955) % (2 * Math.PI / 5) - (2 * Math.PI / 10) >= 0) {
+              return 1 / (Math.cos((2 * Math.PI / 10) - thetaPrime) +
+                          3.07768 * Math.sin((2 * Math.PI / 10) - thetaPrime));
+            } else {
+              return 1 / (Math.cos(thetaPrime) +
+                          3.07768 * Math.sin(thetaPrime));
+            }
+          };
+          break;
+      }
+    }
+
+    /* Make sure gridSize is a whole number and is not smaller than 4px */
+    settings.gridSize = Math.max(Math.floor(settings.gridSize), 4);
+
+    /* shorthand */
+    var g = settings.gridSize;
+    var maskRectWidth = g - settings.maskGapWidth;
+
+    /* normalize rotation settings */
+    var rotationRange = Math.abs(settings.maxRotation - settings.minRotation);
+    var minRotation = Math.min(settings.maxRotation, settings.minRotation);
+
+    /* information/object available to all functions, set when start() */
+    var grid, // 2d array containing filling information
+      ngx, ngy, // width and height of the grid
+      center, // position of the center of the cloud
+      maxRadius;
+
+    /* timestamp for measuring each putWord() action */
+    var escapeTime;
+
+    /* function for getting the color of the text */
+    var getTextColor;
+    function random_hsl_color(min, max) {
+      return 'hsl(' +
+        (Math.random() * 360).toFixed() + ',' +
+        (Math.random() * 30 + 70).toFixed() + '%,' +
+        (Math.random() * (max - min) + min).toFixed() + '%)';
+    }
+    switch (settings.color) {
+      case 'random-dark':
+        getTextColor = function getRandomDarkColor() {
+          return random_hsl_color(10, 50);
+        };
+        break;
+
+      case 'random-light':
+        getTextColor = function getRandomLightColor() {
+          return random_hsl_color(50, 90);
+        };
+        break;
+
+      default:
+        if (typeof settings.color === 'function') {
+          getTextColor = settings.color;
+        }
+        break;
+    }
+
+    /* function for getting the classes of the text */
+    var getTextClasses = null;
+    if (typeof settings.classes === 'function') {
+      getTextClasses = settings.classes;
+    }
+
+    /* Interactive */
+    var interactive = false;
+    var infoGrid = [];
+    var hovered;
+
+    var getInfoGridFromMouseTouchEvent =
+    function getInfoGridFromMouseTouchEvent(evt) {
+      var canvas = evt.currentTarget;
+      var rect = canvas.getBoundingClientRect();
+      var clientX;
+      var clientY;
+      /** Detect if touches are available */
+      if (evt.touches) {
+        clientX = evt.touches[0].clientX;
+        clientY = evt.touches[0].clientY;
+      } else {
+        clientX = evt.clientX;
+        clientY = evt.clientY;
+      }
+      var eventX = clientX - rect.left;
+      var eventY = clientY - rect.top;
+
+      var x = Math.floor(eventX * ((canvas.width / rect.width) || 1) / g);
+      var y = Math.floor(eventY * ((canvas.height / rect.height) || 1) / g);
+
+      return infoGrid[x][y];
+    };
+
+    var wordcloudhover = function wordcloudhover(evt) {
+      var info = getInfoGridFromMouseTouchEvent(evt);
+
+      if (hovered === info) {
+        return;
+      }
+
+      hovered = info;
+      if (!info) {
+        settings.hover(undefined, undefined, evt);
+
+        return;
+      }
+
+      settings.hover(info.item, info.dimension, evt);
+
+    };
+
+    var wordcloudclick = function wordcloudclick(evt) {
+      var info = getInfoGridFromMouseTouchEvent(evt);
+      if (!info) {
+        return;
+      }
+
+      settings.click(info.item, info.dimension, evt);
+      evt.preventDefault();
+    };
+
+    /* Get points on the grid for a given radius away from the center */
+    var pointsAtRadius = [];
+    var getPointsAtRadius = function getPointsAtRadius(radius) {
+      if (pointsAtRadius[radius]) {
+        return pointsAtRadius[radius];
+      }
+
+      // Look for these number of points on each radius
+      var T = radius * 8;
+
+      // Getting all the points at this radius
+      var t = T;
+      var points = [];
+
+      if (radius === 0) {
+        points.push([center[0], center[1], 0]);
+      }
+
+      while (t--) {
+        // distort the radius to put the cloud in shape
+        var rx = 1;
+        if (settings.shape !== 'circle') {
+          rx = settings.shape(t / T * 2 * Math.PI); // 0 to 1
+        }
+
+        // Push [x, y, t]; t is used solely for getTextColor()
+        points.push([
+          center[0] + radius * rx * Math.cos(-t / T * 2 * Math.PI),
+          center[1] + radius * rx * Math.sin(-t / T * 2 * Math.PI) *
+            settings.ellipticity,
+          t / T * 2 * Math.PI]);
+      }
+
+      pointsAtRadius[radius] = points;
+      return points;
+    };
+
+    /* Return true if we had spent too much time */
+    var exceedTime = function exceedTime() {
+      return ((settings.abortThreshold > 0) &&
+        ((new Date()).getTime() - escapeTime > settings.abortThreshold));
+    };
+
+    /* Get the deg of rotation according to settings, and luck. */
+    var getRotateDeg = function getRotateDeg() {
+      if (settings.rotateRatio === 0) {
+        return 0;
+      }
+
+      if (Math.random() > settings.rotateRatio) {
+        return 0;
+      }
+
+      if (rotationRange === 0) {
+        return minRotation;
+      }
+
+      return minRotation + Math.random() * rotationRange;
+    };
+
+    var getTextInfo = function getTextInfo(word, weight, rotateDeg) {
+      // calculate the acutal font size
+      // fontSize === 0 means weightFactor function wants the text skipped,
+      // and size < minSize means we cannot draw the text.
+      var debug = false;
+      var fontSize = settings.weightFactor(weight);
+      if (fontSize <= settings.minSize) {
+        return false;
+      }
+
+      // Scale factor here is to make sure fillText is not limited by
+      // the minium font size set by browser.
+      // It will always be 1 or 2n.
+      var mu = 1;
+      if (fontSize < minFontSize) {
+        mu = (function calculateScaleFactor() {
+          var mu = 2;
+          while (mu * fontSize < minFontSize) {
+            mu += 2;
+          }
+          return mu;
+        })();
+      }
+
+      var fcanvas = document.createElement('canvas');
+      var fctx = fcanvas.getContext('2d', { willReadFrequently: true });
+
+      fctx.font = settings.fontWeight + ' ' +
+        (fontSize * mu).toString(10) + 'px ' + settings.fontFamily;
+
+      // Estimate the dimension of the text with measureText().
+      var fw = fctx.measureText(word).width / mu;
+      var fh = Math.max(fontSize * mu,
+                        fctx.measureText('m').width,
+                        fctx.measureText('\uFF37').width) / mu;
+
+      // Create a boundary box that is larger than our estimates,
+      // so text don't get cut of (it sill might)
+      var boxWidth = fw + fh * 2;
+      var boxHeight = fh * 3;
+      var fgw = Math.ceil(boxWidth / g);
+      var fgh = Math.ceil(boxHeight / g);
+      boxWidth = fgw * g;
+      boxHeight = fgh * g;
+
+      // Calculate the proper offsets to make the text centered at
+      // the preferred position.
+
+      // This is simply half of the width.
+      var fillTextOffsetX = - fw / 2;
+      // Instead of moving the box to the exact middle of the preferred
+      // position, for Y-offset we move 0.4 instead, so Latin alphabets look
+      // vertical centered.
+      var fillTextOffsetY = - fh * 0.4;
+
+      // Calculate the actual dimension of the canvas, considering the rotation.
+      var cgh = Math.ceil((boxWidth * Math.abs(Math.sin(rotateDeg)) +
+                           boxHeight * Math.abs(Math.cos(rotateDeg))) / g);
+      var cgw = Math.ceil((boxWidth * Math.abs(Math.cos(rotateDeg)) +
+                           boxHeight * Math.abs(Math.sin(rotateDeg))) / g);
+      var width = cgw * g;
+      var height = cgh * g;
+
+      fcanvas.setAttribute('width', width);
+      fcanvas.setAttribute('height', height);
+
+      if (debug) {
+        // Attach fcanvas to the DOM
+        document.body.appendChild(fcanvas);
+        // Save it's state so that we could restore and draw the grid correctly.
+        fctx.save();
+      }
+
+      // Scale the canvas with |mu|.
+      fctx.scale(1 / mu, 1 / mu);
+      fctx.translate(width * mu / 2, height * mu / 2);
+      fctx.rotate(- rotateDeg);
+
+      // Once the width/height is set, ctx info will be reset.
+      // Set it again here.
+      fctx.font = settings.fontWeight + ' ' +
+        (fontSize * mu).toString(10) + 'px ' + settings.fontFamily;
+
+      // Fill the text into the fcanvas.
+      // XXX: We cannot because textBaseline = 'top' here because
+      // Firefox and Chrome uses different default line-height for canvas.
+      // Please read https://bugzil.la/737852#c6.
+      // Here, we use textBaseline = 'middle' and draw the text at exactly
+      // 0.5 * fontSize lower.
+      fctx.fillStyle = '#000';
+      fctx.textBaseline = 'middle';
+      fctx.fillText(word, fillTextOffsetX * mu,
+                    (fillTextOffsetY + fontSize * 0.5) * mu);
+
+      // Get the pixels of the text
+      var imageData = fctx.getImageData(0, 0, width, height).data;
+
+      if (exceedTime()) {
+        return false;
+      }
+
+      if (debug) {
+        // Draw the box of the original estimation
+        fctx.strokeRect(fillTextOffsetX * mu,
+                        fillTextOffsetY, fw * mu, fh * mu);
+        fctx.restore();
+      }
+
+      // Read the pixels and save the information to the occupied array
+      var occupied = [];
+      var gx = cgw, gy, x, y;
+      var bounds = [cgh / 2, cgw / 2, cgh / 2, cgw / 2];
+      while (gx--) {
+        gy = cgh;
+        while (gy--) {
+          y = g;
+          singleGridLoop: {
+            while (y--) {
+              x = g;
+              while (x--) {
+                if (imageData[((gy * g + y) * width +
+                               (gx * g + x)) * 4 + 3]) {
+                  occupied.push([gx, gy]);
+
+                  if (gx < bounds[3]) {
+                    bounds[3] = gx;
+                  }
+                  if (gx > bounds[1]) {
+                    bounds[1] = gx;
+                  }
+                  if (gy < bounds[0]) {
+                    bounds[0] = gy;
+                  }
+                  if (gy > bounds[2]) {
+                    bounds[2] = gy;
+                  }
+
+                  if (debug) {
+                    fctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+                    fctx.fillRect(gx * g, gy * g, g - 0.5, g - 0.5);
+                  }
+                  break singleGridLoop;
+                }
+              }
+            }
+            if (debug) {
+              fctx.fillStyle = 'rgba(0, 0, 255, 0.5)';
+              fctx.fillRect(gx * g, gy * g, g - 0.5, g - 0.5);
+            }
+          }
+        }
+      }
+
+      if (debug) {
+        fctx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+        fctx.fillRect(bounds[3] * g,
+                      bounds[0] * g,
+                      (bounds[1] - bounds[3] + 1) * g,
+                      (bounds[2] - bounds[0] + 1) * g);
+      }
+
+      // Return information needed to create the text on the real canvas
+      return {
+        mu: mu,
+        occupied: occupied,
+        bounds: bounds,
+        gw: cgw,
+        gh: cgh,
+        fillTextOffsetX: fillTextOffsetX,
+        fillTextOffsetY: fillTextOffsetY,
+        fillTextWidth: fw,
+        fillTextHeight: fh,
+        fontSize: fontSize
+      };
+    };
+
+    /* Determine if there is room available in the given dimension */
+    var canFitText = function canFitText(gx, gy, gw, gh, occupied) {
+      // Go through the occupied points,
+      // return false if the space is not available.
+      var i = occupied.length;
+      while (i--) {
+        var px = gx + occupied[i][0];
+        var py = gy + occupied[i][1];
+
+        if (px >= ngx || py >= ngy || px < 0 || py < 0 || !grid[px][py]) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    /* Actually draw the text on the grid */
+    var drawText = function drawText(gx, gy, info, word, weight,
+                                     distance, theta, rotateDeg, attributes) {
+
+      var fontSize = info.fontSize;
+      var color;
+      if (getTextColor) {
+        color = getTextColor(word, weight, fontSize, distance, theta);
+      } else if (settings.color instanceof Array) {
+        color = settings.color.shift() || 'black'; // pass a array in setting, default 'black'
+      } else {
+        color = settings.color;
+      }
+
+      var classes;
+      if (getTextClasses) {
+        classes = getTextClasses(word, weight, fontSize, distance, theta);
+      } else {
+        classes = settings.classes;
+      }
+
+      var dimension;
+      var bounds = info.bounds;
+      dimension = {
+        x: (gx + bounds[3]) * g,
+        y: (gy + bounds[0]) * g,
+        w: (bounds[1] - bounds[3] + 1) * g,
+        h: (bounds[2] - bounds[0] + 1) * g
+      };
+
+      elements.forEach(function(el) {
+        if (el.getContext) {
+          var ctx = el.getContext('2d');
+          var mu = info.mu;
+
+          // Save the current state before messing it
+          ctx.save();
+          ctx.scale(1 / mu, 1 / mu);
+
+          ctx.font = settings.fontWeight + ' ' +
+                     (fontSize * mu).toString(10) + 'px ' + settings.fontFamily;
+          ctx.fillStyle = color;
+
+          // Translate the canvas position to the origin coordinate of where
+          // the text should be put.
+          ctx.translate((gx + info.gw / 2) * g * mu,
+                        (gy + info.gh / 2) * g * mu);
+
+          if (rotateDeg !== 0) {
+            ctx.rotate(- rotateDeg);
+          }
+
+          // Finally, fill the text.
+
+          // XXX: We cannot because textBaseline = 'top' here because
+          // Firefox and Chrome uses different default line-height for canvas.
+          // Please read https://bugzil.la/737852#c6.
+          // Here, we use textBaseline = 'middle' and draw the text at exactly
+          // 0.5 * fontSize lower.
+          ctx.textBaseline = 'middle';
+          ctx.fillText(word, info.fillTextOffsetX * mu,
+                             (info.fillTextOffsetY + fontSize * 0.5) * mu);
+
+          // The below box is always matches how <span>s are positioned
+          /* ctx.strokeRect(info.fillTextOffsetX, info.fillTextOffsetY,
+            info.fillTextWidth, info.fillTextHeight); */
+
+          // Restore the state.
+          ctx.restore();
+        } else {
+          // drawText on DIV element
+          var span = document.createElement('span');
+          var transformRule = '';
+          transformRule = 'rotate(' + (- rotateDeg / Math.PI * 180) + 'deg) ';
+          if (info.mu !== 1) {
+            transformRule +=
+              'translateX(-' + (info.fillTextWidth / 4) + 'px) ' +
+              'scale(' + (1 / info.mu) + ')';
+          }
+          var styleRules = {
+            'position': 'absolute',
+            'display': 'block',
+            'font': settings.fontWeight + ' ' +
+                    (fontSize * info.mu) + 'px ' + settings.fontFamily,
+            'left': ((gx + info.gw / 2) * g + info.fillTextOffsetX) + 'px',
+            'top': ((gy + info.gh / 2) * g + info.fillTextOffsetY) + 'px',
+            'width': info.fillTextWidth + 'px',
+            'height': info.fillTextHeight + 'px',
+            'lineHeight': fontSize + 'px',
+            'whiteSpace': 'nowrap',
+            'transform': transformRule,
+            'webkitTransform': transformRule,
+            'msTransform': transformRule,
+            'transformOrigin': '50% 40%',
+            'webkitTransformOrigin': '50% 40%',
+            'msTransformOrigin': '50% 40%'
+          };
+          if (color) {
+            styleRules.color = color;
+          }
+          span.textContent = word;
+          for (var cssProp in styleRules) {
+            span.style[cssProp] = styleRules[cssProp];
+          }
+          if (attributes) {
+            for (var attribute in attributes) {
+              span.setAttribute(attribute, attributes[attribute]);
+            }
+          }
+          if (classes) {
+            span.className += classes;
+          }
+          el.appendChild(span);
+        }
+      });
+    };
+
+    /* Help function to updateGrid */
+    var fillGridAt = function fillGridAt(x, y, drawMask, dimension, item) {
+      if (x >= ngx || y >= ngy || x < 0 || y < 0) {
+        return;
+      }
+
+      grid[x][y] = false;
+
+      if (drawMask) {
+        var ctx = elements[0].getContext('2d');
+        ctx.fillRect(x * g, y * g, maskRectWidth, maskRectWidth);
+      }
+
+      if (interactive) {
+        infoGrid[x][y] = { item: item, dimension: dimension };
+      }
+    };
+
+    /* Update the filling information of the given space with occupied points.
+       Draw the mask on the canvas if necessary. */
+    var updateGrid = function updateGrid(gx, gy, gw, gh, info, item) {
+      var occupied = info.occupied;
+      var drawMask = settings.drawMask;
+      var ctx;
+      if (drawMask) {
+        ctx = elements[0].getContext('2d');
+        ctx.save();
+        ctx.fillStyle = settings.maskColor;
+      }
+
+      var dimension;
+      if (interactive) {
+        var bounds = info.bounds;
+        dimension = {
+          x: (gx + bounds[3]) * g,
+          y: (gy + bounds[0]) * g,
+          w: (bounds[1] - bounds[3] + 1) * g,
+          h: (bounds[2] - bounds[0] + 1) * g
+        };
+      }
+
+      var i = occupied.length;
+      while (i--) {
+        fillGridAt(gx + occupied[i][0], gy + occupied[i][1],
+                   drawMask, dimension, item);
+      }
+
+      if (drawMask) {
+        ctx.restore();
+      }
+    };
+
+    /* putWord() processes each item on the list,
+       calculate it's size and determine it's position, and actually
+       put it on the canvas. */
+    var putWord = function putWord(item) {
+      var word, weight, attributes;
+      if (Array.isArray(item)) {
+        word = item[0];
+        weight = item[1];
+      } else {
+        word = item.word;
+        weight = item.weight;
+        attributes = item.attributes;
+      }
+      var rotateDeg = getRotateDeg();
+
+      // get info needed to put the text onto the canvas
+      var info = getTextInfo(word, weight, rotateDeg);
+
+      // not getting the info means we shouldn't be drawing this one.
+      if (!info) {
+        return false;
+      }
+
+      if (exceedTime()) {
+        return false;
+      }
+
+      // Skip the loop if we have already know the bounding box of
+      // word is larger than the canvas.
+      var bounds = info.bounds;
+      if ((bounds[1] - bounds[3] + 1) > ngx ||
+        (bounds[2] - bounds[0] + 1) > ngy) {
+        return false;
+      }
+
+      // Determine the position to put the text by
+      // start looking for the nearest points
+      var r = maxRadius + 1;
+
+      var tryToPutWordAtPoint = function(gxy) {
+        var gx = Math.floor(gxy[0] - info.gw / 2);
+        var gy = Math.floor(gxy[1] - info.gh / 2);
+        var gw = info.gw;
+        var gh = info.gh;
+
+        // If we cannot fit the text at this position, return false
+        // and go to the next position.
+        if (!canFitText(gx, gy, gw, gh, info.occupied)) {
+          return false;
+        }
+
+        // Actually put the text on the canvas
+        drawText(gx, gy, info, word, weight,
+                 (maxRadius - r), gxy[2], rotateDeg, attributes);
+
+        // Mark the spaces on the grid as filled
+        updateGrid(gx, gy, gw, gh, info, item);
+
+        // Return true so some() will stop and also return true.
+        return true;
+      };
+
+      while (r--) {
+        var points = getPointsAtRadius(maxRadius - r);
+
+        if (settings.shuffle) {
+          points = [].concat(points);
+          shuffleArray(points);
+        }
+
+        // Try to fit the words by looking at each point.
+        // array.some() will stop and return true
+        // when putWordAtPoint() returns true.
+        // If all the points returns false, array.some() returns false.
+        var drawn = points.some(tryToPutWordAtPoint);
+
+        if (drawn) {
+          // leave putWord() and return true
+          return true;
+        }
+      }
+      // we tried all distances but text won't fit, return false
+      return false;
+    };
+
+    /* Send DOM event to all elements. Will stop sending event and return
+       if the previous one is canceled (for cancelable events). */
+    var sendEvent = function sendEvent(type, cancelable, detail) {
+      if (cancelable) {
+        return !elements.some(function(el) {
+          var evt = document.createEvent('CustomEvent');
+          evt.initCustomEvent(type, true, cancelable, detail || {});
+          return !el.dispatchEvent(evt);
+        }, this);
+      } else {
+        elements.forEach(function(el) {
+          var evt = document.createEvent('CustomEvent');
+          evt.initCustomEvent(type, true, cancelable, detail || {});
+          el.dispatchEvent(evt);
+        }, this);
+      }
+    };
+
+    /* Start drawing on a canvas */
+    var start = function start() {
+      // For dimensions, clearCanvas etc.,
+      // we only care about the first element.
+      var canvas = elements[0];
+
+      if (canvas.getContext) {
+        ngx = Math.floor(canvas.width / g);
+        ngy = Math.floor(canvas.height / g);
+      } else {
+        var rect = canvas.getBoundingClientRect();
+        ngx = Math.floor(rect.width / g);
+        ngy = Math.floor(rect.height / g);
+      }
+
+      // Sending a wordcloudstart event which cause the previous loop to stop.
+      // Do nothing if the event is canceled.
+      if (!sendEvent('wordcloudstart', true)) {
+        return;
+      }
+
+      // Determine the center of the word cloud
+      center = (settings.origin) ?
+        [settings.origin[0]/g, settings.origin[1]/g] :
+        [ngx / 2, ngy / 2];
+
+      // Maxium radius to look for space
+      maxRadius = Math.floor(Math.sqrt(ngx * ngx + ngy * ngy));
+
+      /* Clear the canvas only if the clearCanvas is set,
+         if not, update the grid to the current canvas state */
+      grid = [];
+
+      var gx, gy, i;
+      if (!canvas.getContext || settings.clearCanvas) {
+        elements.forEach(function(el) {
+          if (el.getContext) {
+            var ctx = el.getContext('2d');
+            ctx.fillStyle = settings.backgroundColor;
+            ctx.clearRect(0, 0, ngx * (g + 1), ngy * (g + 1));
+            ctx.fillRect(0, 0, ngx * (g + 1), ngy * (g + 1));
+          } else {
+            el.textContent = '';
+            el.style.backgroundColor = settings.backgroundColor;
+          }
+        });
+
+        /* fill the grid with empty state */
+        gx = ngx;
+        while (gx--) {
+          grid[gx] = [];
+          gy = ngy;
+          while (gy--) {
+            grid[gx][gy] = true;
+          }
+        }
+      } else {
+        /* Determine bgPixel by creating
+           another canvas and fill the specified background color. */
+        var bctx = document.createElement('canvas').getContext('2d');
+
+        bctx.fillStyle = settings.backgroundColor;
+        bctx.fillRect(0, 0, 1, 1);
+        var bgPixel = bctx.getImageData(0, 0, 1, 1).data;
+
+        /* Read back the pixels of the canvas we got to tell which part of the
+           canvas is empty.
+           (no clearCanvas only works with a canvas, not divs) */
+        var imageData =
+          canvas.getContext('2d').getImageData(0, 0, ngx * g, ngy * g).data;
+
+        gx = ngx;
+        var x, y;
+        while (gx--) {
+          grid[gx] = [];
+          gy = ngy;
+          while (gy--) {
+            y = g;
+            singleGridLoop: while (y--) {
+              x = g;
+              while (x--) {
+                i = 4;
+                while (i--) {
+                  if (imageData[((gy * g + y) * ngx * g +
+                                 (gx * g + x)) * 4 + i] !== bgPixel[i]) {
+                    grid[gx][gy] = false;
+                    break singleGridLoop;
+                  }
+                }
+              }
+            }
+            if (grid[gx][gy] !== false) {
+              grid[gx][gy] = true;
+            }
+          }
+        }
+
+        imageData = bctx = bgPixel = undefined;
+      }
+
+      // fill the infoGrid with empty state if we need it
+      if (settings.hover || settings.click) {
+
+        interactive = true;
+
+        /* fill the grid with empty state */
+        gx = ngx + 1;
+        while (gx--) {
+          infoGrid[gx] = [];
+        }
+
+        if (settings.hover) {
+          canvas.addEventListener('mousemove', wordcloudhover);
+        }
+
+        if (settings.click) {
+          canvas.addEventListener('click', wordcloudclick);
+          canvas.addEventListener('touchstart', wordcloudclick);
+          canvas.addEventListener('touchend', function (e) {
+            e.preventDefault();
+          });
+          canvas.style.webkitTapHighlightColor = 'rgba(0, 0, 0, 0)';
+        }
+
+        canvas.addEventListener('wordcloudstart', function stopInteraction() {
+          canvas.removeEventListener('wordcloudstart', stopInteraction);
+
+          canvas.removeEventListener('mousemove', wordcloudhover);
+          canvas.removeEventListener('click', wordcloudclick);
+          hovered = undefined;
+        });
+      }
+
+      i = 0;
+      var loopingFunction, stoppingFunction;
+      if (settings.wait !== 0) {
+        loopingFunction = window.setTimeout;
+        stoppingFunction = window.clearTimeout;
+      } else {
+        loopingFunction = window.setImmediate;
+        stoppingFunction = window.clearImmediate;
+      }
+
+      var addEventListener = function addEventListener(type, listener) {
+        elements.forEach(function(el) {
+          el.addEventListener(type, listener);
+        }, this);
+      };
+
+      var removeEventListener = function removeEventListener(type, listener) {
+        elements.forEach(function(el) {
+          el.removeEventListener(type, listener);
+        }, this);
+      };
+
+      var anotherWordCloudStart = function anotherWordCloudStart() {
+        removeEventListener('wordcloudstart', anotherWordCloudStart);
+        stoppingFunction(timer);
+      };
+
+      addEventListener('wordcloudstart', anotherWordCloudStart);
+
+      var timer = loopingFunction(function loop() {
+        if (i >= settings.list.length) {
+          stoppingFunction(timer);
+          sendEvent('wordcloudstop', false);
+          removeEventListener('wordcloudstart', anotherWordCloudStart);
+
+          return;
+        }
+        escapeTime = (new Date()).getTime();
+        var drawn = putWord(settings.list[i]);
+        var canceled = !sendEvent('wordclouddrawn', true, {
+          item: settings.list[i], drawn: drawn });
+        if (exceedTime() || canceled) {
+          stoppingFunction(timer);
+          settings.abort();
+          sendEvent('wordcloudabort', false);
+          sendEvent('wordcloudstop', false);
+          removeEventListener('wordcloudstart', anotherWordCloudStart);
+          return;
+        }
+        i++;
+        timer = loopingFunction(loop, settings.wait);
+      }, settings.wait);
+    };
+
+    // All set, start the drawing
+    start();
+  };
+
+  WordCloud.isSupported = isSupported;
+  WordCloud.minFontSize = minFontSize;
+
+  // Expose the library as an AMD module
+  if (typeof define === 'function' && define.amd) {
+    define('wordcloud', [], function() { return WordCloud; });
+  } else if (typeof module !== 'undefined' && module.exports) {
+    module.exports = WordCloud;
+  } else {
+    global.WordCloud = WordCloud;
+  }
+
+})(this); //jshint ignore:line
+</script>
+<script>// create element
+function newlabel(el){
+  var newDiv = document.createElement("div");
+  var newSpan = document.createElement("span");
+  newDiv.id = 'wcLabel';
+  newSpan.id = "wcSpan";
+  el.appendChild(newDiv);
+  document.getElementById("wcLabel").appendChild(newSpan);
+}
+
+// hover function
+function cv_handleHover(item, dimension, evt) {
+  var el = document.getElementById("wcLabel");
+  if (!item) {
+    el.setAttribute('hidden', true);
+
+    return;
+  }
+
+  el.removeAttribute('hidden');
+  // console.log(evt.srcElement.offsetLeft);
+
+  el.style.left = dimension.x + evt.srcElement.offsetLeft + 'px';
+  el.style.top = dimension.y + evt.srcElement.offsetTop + 'px';
+  el.style.width = dimension.w + 'px';
+  el.style.height = dimension.h + 'px';
+
+  this.hoverDimension = dimension;
+
+  document.getElementById("wcSpan").setAttribute(
+    'data-l10n-args', JSON.stringify({ word: item[0], count: item[1] }));
+  document.getElementById("wcSpan").innerHTML =item[0]+":" + item[1];
+
+}
+
+function updateCanvasMask(maskCanvas) {
+    var ctx = maskCanvas.getContext('2d');
+    var imageData = ctx.getImageData(
+        0, 0, maskCanvas.width, maskCanvas.height);
+    var newImageData = ctx.createImageData(imageData);
+
+    var toneSum = 0;
+    var toneCnt = 0;
+    for (var i = 0; i < imageData.data.length; i += 4) {
+        var alpha = imageData.data[i + 3];
+        if (alpha > 128) {
+            var tone = imageData.data[i]
+                + imageData.data[i + 1]
+                + imageData.data[i + 2];
+            toneSum += tone;
+            ++toneCnt;
+        }
+    }
+    var threshold = toneSum / toneCnt;
+
+    for (var i = 0; i < imageData.data.length; i += 4) {
+        var tone = imageData.data[i]
+            + imageData.data[i + 1]
+            + imageData.data[i + 2];
+        var alpha = imageData.data[i + 3];
+
+        if (alpha < 128 || tone > threshold) {
+            // Area not to draw
+            newImageData.data[i] = 0;
+            newImageData.data[i + 1] = 0;
+            newImageData.data[i + 2] = 0;
+            newImageData.data[i + 3] = 0;
+        }
+        else {
+            // Area to draw
+            // The color must be same with backgroundColor
+            newImageData.data[i] = 255;
+            newImageData.data[i + 1] = 255;
+            newImageData.data[i + 2] = 255;
+            newImageData.data[i + 3] = 255;
+        }
+    }
+
+    ctx.putImageData(newImageData, 0, 0);
+    console.log(maskCanvas.toDataURL());
+}
+
+
+
+//mask function
+function maskInit(el,x){
+  console.log(1)
+  str = x.figBase64;
+  //console.log(str)
+  var newImg = new Image();
+  newImg.src = str;
+  newImg.style.position = 'absolute';
+  newImg.style.left = 0;
+  // console.log(el.clientHeight);
+  newImg.width = el.clientWidth;
+  newImg.height = el.clientHeight;
+  // maskCanvas = init(el, x, newImg);
+  vvalue = 128
+
+  ctx = el.firstChild.getContext('2d');
+
+                ctx.drawImage(newImg, 0, 0, canvas.width, canvas.height);
+                updateCanvasMask(ctx);
+
+
+
+
+
+            WordCloud(el.firstChild, { list: listData,
+                  fontFamily: x.fontFamily,
+                  fontWeight: x.fontWeight,
+                  color: x.color,
+                  minSize: x.minSize,
+                  weightFactor: x.weightFactor,
+                  backgroundColor: x.backgroundColor,
+                  gridSize: x.gridSize,
+                  minRotation: x.minRotation,
+                  maxRotation: x.maxRotation,
+                  shuffle: x.shuffle,
+                  shape: x.shape,
+                  rotateRatio: x.rotateRatio,
+                  ellipticity: x.ellipticity,
+                  clearCanvas: false,
+                  drawMask: true,
+                  hover: x.hover || cv_handleHover,
+                  abortThreshold: 3000
+                  });
+}
+
+</script>
+<script>HTMLWidgets.widget({
+
+  name: 'wordcloud2',
+
+  type: 'output',
+
+  initialize: function(el, width, height) {
+    var newCanvas = document.createElement("canvas");
+    newCanvas.height = height;
+    newCanvas.width = width;
+    newCanvas.id = "canvas";
+
+    el.appendChild(newCanvas);
+    newlabel(el);
+    return(el.firstChild);
+  },
+  renderValue: function(el, x, instance) {
+  // parse gexf data
+        listData=[];
+        for(var i=0; i<x.word.length; i++){
+          listData.push([x.word[i], x.freq[i]]);
+        }
+     if(x.figBase64){
+
+        maskInit(el,x);
+        console.log(3)
+
+      }else{
+        WordCloud(el.firstChild, { list: listData,
+                        fontFamily: x.fontFamily,
+                        fontWeight: x.fontWeight,
+                        color: x.color,
+                        minSize: x.minSize,
+                        weightFactor: x.weightFactor,
+                        backgroundColor: x.backgroundColor,
+                        gridSize: x.gridSize,
+                        minRotation: x.minRotation,
+                        maxRotation: x.maxRotation,
+                        shuffle: x.shuffle,
+                        shape: x.shape,
+                        rotateRatio: x.rotateRatio,
+                        ellipticity: x.ellipticity,
+                        drawMask: x.drawMask,
+                        maskColor: x.maskColor,
+                        maskGapWidth: x.maskGapWidth,
+                        hover: x.hover || cv_handleHover
+                        });
+      }
+    },
+      resize: function(el, width, height) {
+      }
+
+});
+</script>
+
+</head>
+<body>
+<div id="htmlwidget_container">
+  <div id="htmlwidget-d8fcfaab778af03b093a" style="width:960px;height:500px;" class="wordcloud2 html-widget"></div>
+</div>
+<script type="application/json" data-for="htmlwidget-d8fcfaab778af03b093a">{"x":{"word":["好","不错","很","的","好评","还","了","舒服","挺","质量","非常","可以","满意","喜欢","伞","很大","杯子","也","味道","用","还行","没有","买","有点","好用","大","异味","吧","手感","方便","高","有","感觉","不","枕头","就","东西","就是","是","特别","很棒","我","物美价廉","还好","物流","很快","快递","苏宁","价格","这个","没","好看","比较","水杯","质感","快","购买","没用","都","结实","好好","值得","挺大","便宜","还是","给","第二次","啊","漂亮","雨伞","睡","做工","乳胶","性价比","无","很软","一个","真的","挺不错","实惠","速度","够","看着","超级","发货","起来","说","希望","软","合适","但是","宝贝","材质","挺舒服","一把","薄","哈哈哈","舒适","一点","棒","重","比","磨砂","追评","知道","负面","轻便","一般","着","应该","不是","和","挺好用","两个","收到","在","呢","时候","不漏水","推荐","打开","包装","中","一般般","伞面","一样","小","棒棒","哒","枕","耐用","味","容量","实用","再","什么","颜色","整体","气味","看起来","划算","颜值","回购","到","觉得","哦","赞","喝水","问题","又","放","会","不会","想象","您","适合","物超所值","这","上","携带方便","值","蛮","遮阳","人","孩子","好大","携带","而且","太","睡着","枕着","几天","ok","超好","拿","难受","你","不满","自动","不过","使用","运动","睡眠","伞大","确实","一下","小哥","跟","睡得","真不错","柔软","那么","香味","活动","元","才","总体","一股","效果","老公","点","大小","多","把","描述","极好","尺寸","相当","精致","能","软软","期待","信任","也好","刚","防晒","第二个","服务","送人","与","朋友","挺软","男朋友","稍微","速度快","不好","啦","丢","一次","给力","软和","太重","拥有","除了","看","ml","其他","太大","呀","对","用过","已经","硬","降价","买贵","没什么","特快","伞柄","购物","一点点","差评","贵","去","物有所值","设计","真好","送货","他","分量","很值","good","又快又好","细长","差强人意","verygood","好货","尺码","但","哈哈","外观","正常","怎么","以后","刚好","有些","客服","瑕疵","健身","超棒","来","睡觉","要","第二天","两天","喝","晾","凑","很轻","放心","帮","容易","偏大","下雨","沉","老妈","需要","以前","自己","还有","过","刚刚","好软","超","一分货","一分钱","二次","送货上门","大容量","一些","完","儿子","黑胶","手里","个","哈哈哈哈","体验","信赖","塑料","字","烫","面料","我们","高级","价格便宜","更","一直","滑","符合","淡淡的","坑","高大","一","脖子","开始","那种","啥","暂时","所以","之前","送给","枕套","还要","杯体","老爸","来说","样子","不能","型","服务态度","小苏","足够","五分","真","入手","想要","哈","不到","摔","好不好","完全","带","后","想","选择","配送","等","极物","一天","开心","试用","够快","送到","一级","已","用用","外形","手柄","特","差","五星","顺滑","买大","品质","提高","刺激","恩呐","特別","挺沉","试","有股","翻","换","里面","热水","的话","垃圾","最","很漂亮","买来","水","不要","下","员","很多","更好","伞够","大伞","颈椎","支付宝","可能","评价","产品","价位","到货","看看","力","慢","些","密封","接受","下次","使用方便","杠杠","杯","不重","其它","安全","卖家","地方","正品","送","炒鸡","深","正好","大家","木质","支撑","而","变形","具体","价钱","三天","奶","摸起来","太硬","差价","购入","伞骨","再说","爸爸","建议","绝对","性","淘宝","毛病","块","开关","目前","蛮大","再次","只是","易购","这次","不贵","很长","不太","用后","能用","虽然","态度","必备","因为","杯身","密封性","试过","一致","挺快","外面","中大","好多","优惠","晒","这是","哎","图片","亲亲","退","乳","吗","是不是","底部","随便","强烈推荐","下单","开水","时尚","以为","好多天","让","还算","抗风","较","几好","iwenttothegymalot","soiboughtawaterglass","thewaterglasswastoobigbefore","哭","很厚","捏","呦","nice","海星","挺大挺","巨大","未用","挺酷","稍","装","几","材料","骨架","一起","超值","为","人工","看到","开合","高度","味儿","相信","预想","把手","心选","它","满分","泡","这种","漏水","晚上","胶味","昨天","之后","发现","完美","别人","摸","永远","选","那个","弹性","加","买回来","多次","普通","回弹","现在","买买","差不多","人用","很差","准备","档次","先","出水","懒得","安稳","再来","女朋友","要是","通风","洗","当天","低","感覺","高档","有点儿","买过","很重","搞","比较满意","精细","破损","被子","继续","第一次","收","太快","不少","到位","习惯","一模一样","透光","几个","弄","重中之重","轻巧","后续","掉","夏天","有个","适中","一口","贼","美观","真心","任何","厚实","影响","只","合理","下雨天","每天","星期","太好","开","app","必须","初步","没错","第二把","说实话","不怕","愉快","后悔","坏","牢固","一晚","假货","支持","paratex","巴适","及格","价高","持久","好大个","毫无","没话说","超赞","双人","三","收缩自如","十分满意","太好了","商品","只能","不怎么","直接","极了","感谢","没法用","股","评论","严重","散","带来","点赞","实物","一定","反正","力度","妈妈","刻度","重新","扎实","久","一段时间","怎样","量","慢慢","总是","家","挺重","这款","基本","颗粒","按","达","公司","毕竟","前","一款","改善","没坏","略重","奶味","拍","超高","做","不实","价了","抱歉","特价","出门","天","及时","带子","阳台","品牌","几乎","一只","仔细","好像","对象","钱","橡胶","不大","心里","伞太大","握持","终于","在线","折叠","号","完全一致","最近","偏软","不知","如果","耐","怕","怎么样","新","下来","黑色","总之","海绵","货","出来","咋","己","不酸","不散","一对","阔以","神速","针对","挺值","会来","松","转动","男士","全黑","陪女","盆友","两把","促销","好够","好收","说好","弟弟","等待","凉","毛刺","快速","噢","当","严实","晒晒","表示","放在","等到","逼","水量","香","师傅","开收","自如","偏小","瓶身","久久","开伞","几次","麻烦","确定","似乎","水壶","提升","期望值","伞蛮","健身房","收伞","对于","隔日","部门","一小","男生","还会","懂","行","这么","商家","漏","近景","扭扭捏捏","她","晃","书包","且","健康","运送","成分","玩意","疼","家长","奶胶味","一两天","上面","矿泉水","含量","好点","估计","多久","平台","地","后期","灵活","款","用久","昨天晚上","不用","不了","今天","隔热","唯一","不足","同事","缺点","努力","超出","被","几十块","不亏","问","精美","嘛","手动","么","只要","侧","用得","第四个","岳父","岳母","亲民","满减","哟","起球","是否","很正","杯底","狠","快准","感情","闷","风格","极简","老婆","上学","快伞","布面","太小","超大","开秒合","秒","被骗","上当受骗","太太","柄","稳","打","经常","挡雨","拆开","略","不够","不值","出去","单独","时","h","打伞","进去","女生","塞","旅行","手摸","枕上","送上门","开箱","隔天","运费","两人用","物流配送","中评","自动伞","开车","同款","难闻","急","很薄","最好","牌子","耐心","功能","正是","没试","较大","闻","暴雨","无限","于","紫外线","方面","显示","躺","开启","首先","那","奇怪","主要","盖子","加强","没想到","开口","好物","最后","天然","好久","或者","像","损坏","服务质量","送来","另外","区别","军训","不便","价","才能","洗过","时间","重要","肯定","挑","家里","越","这伞","哥哥","很松","块钱","人员","小时","茶","月","香香的","晾晒","弹弹","挺高","三佰多","茶杯","赞赞赞","俩","攒着","美滋滋","任","啊啊啊","磕坏","大大的","坑坑洼洼","遮阳伞","干得","甩水多","处","关节","卡","把子","光滑","费力气","收伞略","旧","tritan","第一把","各","负责","生活","祝您","主动","松动","积极","提交","相关","至","疼痛","流畅","带去","及","不错呀","防","散散","干","大雨","这样","清洗","作为","细节","里","来讲","一流","遇到","找","刺鼻","然后","得","不敢","反馈","环保","烂","感","外出","一共","风雨","长时间","惊喜","一键","全","每","支撑力","点个","碰到","大大","轻微","女士","硬度","家人","帮助","咋样","真滴","出发","细看","牛","自行车","说够","爷们","出乎意料","家里人","上车","早","成","集颜值","一体","大势所趋","自营","不比","特百惠","爸","男票","久点","胖人","鸡腿","抗风强","双肩包","男","口渴","据说","盒子","将","后面","后来","塌陷","到底","含","吹","们","就行了","蓝色","大气","掉下来","该","算","相符","臭","嗯","打算","软硬","核实","一瓶","待","能装","重量","摸上去","木","这点","广告","父母","很赞","没用过","办法","物品","实际","不见","全是","光顾","顺畅","有味","另","弹簧","热","闻到","的确","担心","编号","成立","举报","投诉","小米","倒","次日","十分","苏夏野","雨水","并","跟进","到现","慌","熏得","想象力","比棉","宽","很弹","躺下去","醒","一觉","自然","出水口","话","三十几块","水位","禁","想像中","保险","双层","好喝","用水","超乎","层","支撑杆","不小","如何","很贵","嘻嘻","提供","两次","顾客","真给力","买个","所有","口","伞布","注意","本","既然","手机","消费者","难","理想","同学","作用","鲸","弹力","甩","写","退货","美中不足","结果","透","超快","雨","今天上午","地上","实话实说","成人","面积","弹","跑","高温","不在","你们","正","不如","别家","快捷","问着","讨厌","蛾子","女儿","大赞","同意","泡泡","不宜","有锁","八点","尽职","出水量","很爽","热爱","不防","之处","噗","鬼","稍贵","够重","实木","准时","防雨","感较","兰博基尼","我开","袖","珍贵","我弹","女孩子","耐高温","往","回复","送过来","货物","望","苏","云锦","辛苦","三个","转接","乒乒乓乓","拿到","饮水量","其次","快点","到手","上门","雨天","如","导致","单手","吸嘴","阿","卖","无论是","早上","补","可","介绍","真假","同价位","宝宝","咨询","差别","留","打不开","变成","保障","请假","俩样","高枕","个人","没睡","有护","纯度","柔软度","闻起","不符","爷爷","想买个","一晒","保护","涨","太软","一波","基本上","简洁","号称","放收","手术费","一块钱","醉","短","超級","給力","快遞","喜歡","瘦长","太细","多少钱","近期","极速","滿意","隔夜","好几个","公模","水速","收放自如","回去","本身","充值卡","费劲","cm","用来","可惜","瓶盖","手上","送达","一种","险","请","售后","第一","赶上","打电话","合算","党","学生","撑","指纹","小孔","不适","用心","明显","聚","没法","难道","考虑","太棒了","没能","星","走","细心","真是","自从","认真","监督","一位","每次","第一天","经历","长","滤网","代","枕头套","本来","罩子","很浓","试一下","处理速度","更棒","密实","小硬","再软","股味","会有","部队","真正","不相上下","极高","扣乐扣","乐","壁会","放热","车上","很能","架","水够","看见","简直","希乐","一毛","绿豆汤","急急","金","补水","刚来","酷","加入","搬","工地","很足","砖","迟点会","接头","为什么","翻散","送货到","惨","来得及","查看","开盖","这么久","盲目","首选","不算","近","部位","灰色","升","电话","试试","从","度","实体店","趁着","打折","半自动","全自动","款式","上档次","渠道","别","劝","痘","全家","好觉","睡个","出品","猫宁","睡低","入睡","晾着","好大一","略大","一晒会","半价","入","家门口","但用","凹坑","兜","其余","他家","杯水","七八","天堂伞","顽强","旅游","全靠","车里","启动","骨伞","伞重","不太能","防风","毫无意义","有用","撑开","易","马上","及时处理","深表歉意","未","太行","犹豫","强","解决","别说","那些","道歉","技能","培训","员工","告诉","天气","居然","吃力","出","为了","学校","苏夏云","有毒","适应","这边","名符其实","加油","下去","换成","散味","躺上去","天鹅绒","臭味","货有","胶水","不得了","房间","味大","整个","个赞","非常适合","喂","中体","高好","发到","粉嫩","配件","大量","水分","优之","一倍","尽量","温水","不晃","刷单","应急","漏雨","冲鸭冲","两三年","呐","鸭","十块","tb","研究","过滤网","胶圈","不行","拆","同一","过滤","不下雨","爱","只有","联系","下午","经济","太慢","怎么回事","得到","优秀","大暴雨","包裹","仙女","酸痛","鼻子","可爱","改进","透明","亏了","跟风","五颗星","一看","要求","凸起","观察","记住","免费","收件","太像","裸芯","身体健康","取件","追加","类肤质","比狗东","亲肤","防漏","很强","耐温","外部","就够","时带","一杯","胖","瘦","简约","换货","没多","奈斯","里头","太薄","合格","伞伞","太阳伞","梦寐以求","衷心","电池","电要","就弹","收开","到来","合上","容","老板","摁","连","握感","开伞合","姐姐","痕迹","接水","还给","隔","迷路","分","打球","用力","风大","无毒","之","无敌","线","门口","手","搜","睡惯","宿舍","多大","姥姥","姥爷","派件","锻炼","塑料制品","神仙","awsl","不负","好价","绳","够用","观感","小口","巧妙","实验室","四个","半夜","床头","省","把握","瓶体","价廉","物美","味洗","少","八方","一重","蛮高","已到","还会来","原来","硅胶","这里","矮","对比","气人","掌柜","他们","脏","周到","比膳","魔师","用料","外包装","再入","咕嘟","优质","下手","积分","找到","很小","或者说","三四天","变直","有没有","第三次","分离","要么","背","伞收","胸包里","下过","辣","遮光","包包","感动","劣质","看过","简单","苏羽","过来","再就是","最大","压缩","然而","嗅觉","头发","苏生慧","对话框","阖家幸福","建议您","尽快","输入","我司","优质服务","一个月","一丝","各种","特意","批次","送个","套套","独立","x","加分","奶香奶","棉花","睡塌","姿势","果冻","有点像","竹味","嗮","用惯","水泡","我用","小贵","强烈建议","太美丽","无所谓","很酷","没舍得","脆感","比富光","身体","最新","福鼎","咯莫可","敏魔","魄力","寿终正寝","我婆","无题","系咯","学院","移民","真咯","职业","尴尬","顶","嘤","网易","危险","严选","pp","轻轻","几分钟","按键","多少","试试看","处理","更加","通知","承诺","出行","谢谢","因","吓一跳","搞定","并且","凑合","程度","大哥","差一点","两层","原配","中有","见面","历经","云端","京东","吃亏","很够","绳带","水瓶","难看","总的来说","一顶","算是","缩短","通病","重和大","真大","费","力气","收回","五十块","黑","一生","很淡","小孩","运输","平躺","半天","夸张","单","糊弄","渣","直掉","玩","店家","肩颈","见","如有","需求","海蓝时","林深","鹿","梦醒","时见","终究","包邮","比要","好闻","现有","过段","抓","真快","解锁","模式","始终","爹","太坑","最低","机会","要用","比心选","渗进来","出差","拍照","杵","大收","涂层","事情","享受","泰国","美丽","太急","毫升","散掉","太阳","电商","忍不住","杆","回来","波浪","调整","胶","两种","改善生活","荞麦皮","一百多块","那块","越卖","版","l","locklockthermos","半瓶","容积","大半夜","安逸","很沉","使大劲","太给力","圈","中间","总","热情","这些","上去","验货","前两天","伸缩","玻璃杯","句","女人","我能","胸部","拆下来","赶紧","洗洗","热情周到","老爹","精神","说明","醒来","有利于","一会儿","买前","夜里","实测","暂无","用户","邮费","一身","优化","大是","单层","一吹","冲着","花里胡哨","电脑","回答","颈椎病","累","世界","决定","量量","台风","其实","证明","按摩","表扬","客户","遮雨","到时候","一遍","茶叶","反应","杯盖","规格","睡多高","挑选","大用","点钱","减轻","硬点","趁","茶花","过头","环","磕","扣","锁定","smzdm","大爱大爱","多出","喝一杯","满足","不愧","丝毫","买不到","真哈","最怕","精品","自有","回收","劲","难收","渗","折","劲儿","要费","bug","不太好","肚子","很痛","收得","捅","要收","怀疑","果然","转头","就让","太高","机器人","不同","不易","店铺","现象","不管","当时","幸苦","差点儿","订","今天下午","生日礼物","昨天夜里","不装","动不动","类肤","很心","暖","开水烫","看上去","太差","闺蜜","空气","一切","棉芯","睡过","自家","还原","能力","踏下去","头部","十足","今晚","拿来","推","五","业务员","强大","日常","伞布略","伞大而稳","粘上","总得来说","足矣","要说","班车","很暖心","没拿到","偏僻","托运","布料","弹坏","爸妈","说用","自用","年","教训","天猫","折叠伞","旁边","保温杯","乳味","说法","化学","制品","大热天","汗","满脸","qq","老人","越南","或许","来评","落俗","亲切","友好","出个","第一印象","没遇","拿在手上","买到","小区","平时","没货","乳突","这件","睡姿","因人而异","吃饭时间","上班","这算","d","单一","花茶","说不出","自带","背包","电脑主板","盖","盖要","撒","水壶盖","同包","压好","类型","烫过","不爽","方口","价前","往出","为啥","盒","原装","纸盒","划痕","挡风","这段话","失眠","仓库","相对","懒","刚看","还算能","家纺","十多天","要降","长辈","烈日","快要","烂烂","乳香","不坏","耐热","阳光","道","服从","上周二","问客","一片","收货","质地","特殊","放进","成功","买家","靠","几百","偏高","商场","直发","曲线","一口气","几小时","十几","偏短","太短","真的假","满满的","产业","承办","军运会","利好","旗下","潜伏","体育","涨飞","中奥","子公司","代工","女","暖色调","再有","食品级","细腻","软质","属于","表达","批评","二星","三星","四星","一星","当然","手中","有时","磨破","小心","扔","生意兴隆","躲","按压","果断","颈部","睡一觉","文化","形状","败絮其中","表面","当买个","骨断","刮过来","金玉其外","一阵风","无法","折磨","事实","不想","确认","想着","除","除味","解释","螨","旗舰","不留","不太够","热时","手汗会","原以为","保护套","好几条","留下","拿稳","伤痕","水泥","凑合着","甩干","详细","白天","图书馆","污染","勉强","这才","青年","锁","有券","这条","看重","趟","挑水","亲自","厂家","二十多","生产","手提","水流","小件","人群","相对来说","忘","门店","回头","迟早","倒闭","就闻","内芯","侧面","底","改睡","一边","一头","八卦","八重","搏","不出","缠","缠山","兑分","分金","风雷","乾坤","艮","关","关门","坎离震","山泽","死门","四象","通气","形","寻龙","巽","阴阳","有生","大力","福州","后要","慎拍","收完","挺薄","压回去","验证","保存","一样样","布","淘气","来到","重要性","掌柜的","蛋糕","放开","纯","男孩","不刺","便跃","诚心","第一眼","工艺","精心","精湛","捧","如获至宝","如至","尚","生","线条","欣喜","雅美","掌心","珍品","标签","别买","会散","剪","介意","感好","上边","身手","停断","小眼","不曾","不置可否","冲刷","当作","发生","咪咪","男人","乌鲁木齐","新疆","犹豫不决","北京","没下","青岛","幸好","邮政","整","就关","遮太阳","半个","所谓","菜鸟","驿站","发","杯口","倒地","开孔","挺棒","啧啧","几遍","三遍","上手","爱情","城堡","妥妥","放置","实在","赚","觉醒","充分","感叹号","后边","简简单单","内心","中雨","一百","同时","叫","哪个","而来","呵呵","变好","妈","q","之一","高端","托起来","九点","头天","很气","在家","全部","妈用","拍图","最高","催","包里","高性价比","喝不上","一点儿","着急","摇晃","陪","搬运","保质期","当场","鼎力相助","管理","挤压","拒收","磨损","难免会","认可","提醒您","完好","旺旺","温馨","花","女孩","包装盒","悲哀","感到","真为","百分","九十","考量","可见","裂缝","裂开","撕扯","味道不好","一扯","有待","范围","气","忍受","缘故","之内","撑得","动弹","自","即可","解决问题","藏","潮退","搁浅","惊","鲸踏浪","看来","浪涌","鹿见","鹿惧","鹿踏雾","落","起","浅滩","人前","如惊","如碌","时雾","时夜续","随浪","雾气","响应速度","消失","心","亦","涌","于林深","怎知","鼻孔","喝得","角度","孔","流入","流水","倾斜","造成","诶","放放","抱","小盆友","住校","弹盖","嗝","吃","回","傍晚","竟然","微","键","慎入","透光率","图","图个","我爸","遇风","转赠","安装","固定","螺丝","小磕痕","走心","不厌其烦","发得","关键","好困","解答","伞略重","细致","疑问","包换","包退","冲","缝线","接根","淋浴间","请问","水管","不断","不停","你家","乱七八糟","无奈","吃饭","内里","试一试","一年","报道","称","废话","陌","陌上","某膜","剩下","先用","相濡以沫","新闻网","ms","坑货","天有","最低价","风","胜在够","挺大挺重","脱线","稳固","瑕疵品","一根","并非","不付","代价","换取","今日","愿意","自由度","人家","中午","专门","出门在外","带个","点点","喝点","摔坏","岀","挑不出","保温","关时","很香","晃悠","客户端","下开","吓人","显得","避","赶在","连门","没伞","起雨","上午","雨前","直到","财富","好几处","检查","五元","寄","可是","棒球","好几","内衬","苏明风","分别","分成","三次","成年人","好太多","耐用性","下面","一分","好重","祝","听","就算","刷","屏","用软","装水试","改变","空间","美好生活","哪","那点","事儿","一份","一切众生","差点","风吹","一圈","等等","复制","给出","会员","网友","易易","撑下","大人","放伞","刮风下雨","淋湿","缺伞用","严严实实","多年","不像","差多","没买","挺慢","枕芯","申请","拉链","心理作用","反对","爱不释手","绺","橡胶厂","中说","比心","超美超","很烂","舍不得","差异","超市","服","请客","塑胶","包","第二","第三","第四","防止","蛮快","世","淑芬","a","发错","返场","公婆","六","漏发","敏感","睡点","一八","完整","不理","积物","极度","立刻","听说","沾沾自喜","z","别想","合拢","心疼","压拢","一层","一手","短信","刚买","很慢","南京","浙江","角","看吧","类似","泡沫","气球","退换","先不说","一块","一捏","折腾","子","走进","出彩","高兴","公共英语","毫不","命中","送送","之选","超轻","撑伞","两只手","头","小伞","遮住","这回","差到","交流","牢","两人","轻度","收时","收下","算啦","往下","嫌","一下子","刚用","架子","经久耐用","看出","破","生锈","十来次","立马","折伞","叭","不进","挤","链","托力","陷","捉","不巧","大概","弹出","指望","突然","道德","身上","水平","自尊","发乌","粉色","每个","能出","衣服","杯内","尘埃","丑","多用","方便使用","各国","环行","领域","热饮","盛载","四周","液体","因杯","遮掩","智能","种类","不香","臭气","那样","球","洞","烂评","没理","传统","解渴","谱","释放出","塑料杯","物质","异","生气","承托","感觉良好","高于","换洗","或","记忆","加购","款要","配套","尚可","试睡","一批","赠送","总要","搬进","吵","窗户","垫着","风景","够不着","脚","礼貌","楼下","猫","闹","桥","瞧一瞧","热闹","睡不着","四月","台真高","无聊","午后","一座","正合适","知","大大小小","马","十八","县城","刚到","会碎","廉价","甩出","印子","关顾","看得出来","亲切感","隔壁","狗东","家发","原谅","早就","不差","反省","高升","节节","路上","买卖双方","双赢","说话","统一","万能","心烦","一条","猪","自行","逞强","床","打工","单身","段子","对酒当歌","富婆","狗","街","看穿","期盼","缺乏","却","日久生情","生人","熟人","四下","逃不掉","条件","伪装","无人","小乖","卸下","心房","咬紧牙","夜","一见钟情","抓紧","资本","比较稳定","空气流通","男性","硼酸","水倒","碎","以上","感应卡","加厚","升级","升级版","手电","手电筒","贴近","透过去","为主","不得不","大拇指","烦","价美物廉","敬意","可不","竖起","向","由衷","有问必答","专业","凹洞","没人","煲","冰棒","冰淇淋","饼","彩虹","翅","臭豆腐","粉丝","芙","干锅","韩国","汉堡","黑森林","红烧肉","花甲","花螺","火锅","火鸡","鸡","鸡翅","鸡脚","烤","烤鸡","烤肉","可乐","拉面","麻辣","麻薯","马卡龙","芒果","面","年糕","牛排","牛肉","糯米","藕","巧克力","日本","日本料理","肉蟹","三杯","三明治","沙拉","烧烤","酸奶","甜","西冷","西米露","香草","香辣","小丸子","星冰乐","羊排","羊腿","玉米","炸","炸鸡","章鱼","孜然","呈现","店大欺客","烂货","二手","里边","凉凉","没见","递给","很近","离","啰嗦","谁","提醒","远","站","不久","感谢您","没味","塑料袋","致歉","byt","爱相随","彼此","打扰","互相","看好","连风","留在","牵著手","是因为","逃","天黑","微笑","相依为命","心甘情愿","幸福","依靠","有种","这座","皱眉","座","理解","子破","握把","给我发","分配","假","胶枕","猫宁上","别是","低于","就行","随着","小作坊","一大堆","以次充好","正宗","之间","质量保证","福利","浪费","每条","实在太","系统","涨气值","而已","失望","无语","信誉","五天","特地","地去","每一件","所","中意","自动开关","不在乎","槽","穿","传热","倒入","急急忙忙","家门","两分钟","门","前后","三十元","烫手","吐","误解","下楼","信息","一句","晕","这类","真送","值个","指","逛街","离开","帽子","八点钟","工作者","缓解","坚持","提出","完货才","下班","昨晚","单买","更快","关于","关注","很坑","较慢","量过大","披肩","情况","软刚","同","效率","超期","故意","理由","耍赖","说理","天无","拖延时间","无处","多天","额前","发工资","后会无期","话题","肉","手机号","晚饭","我会","不良","从来","挂钩","劳动","弄脏了","五个","要素","派件员","收点","完好无损","波动","那边","赔","再降","倒转","干净","喝茶","老客户","凉白开","零件","瓶子","商品质量","温开水","严密","地址","上班时间","兑换","剧烈","内部","清脆","提手","贴心","图四","拽","装置","爆","烫洗","一颗","沟通","害","买时","唯独","不多见","才华","攻略","获得","惊讶","模板","网上","学乖","增长","值会","至于","币","不在意","大多","风险","购物券","回顾","津贴","免去","日期","晒图","生活用品","视频","琐事","瞎逛","新鲜","以来","越来越","折扣","真是太","注册","淡","滴","拉开","里衬","晒太阳","提示","我妈","一半","友情","不忍心","大萨达","嘚","放过","噶","好心","拒绝","满","妹子","面前","奈何","偶买","敲","敲字","软磨硬泡","瑟","善良","擅长","甚至","文字","喜爱","写作","有效","真实","嘴","做出","不合理","犯","花钱买","解决不了","奇差","题库","未犯","越疼","再也","答应","反感","距离","申明","失信于人","事先","顺丰","原本","总结","做法","shi","懂得","大好","何况","烘干","烘干机","空","网购","一大块","有图","真相","本人","不能平静","沧海桑田","畅","此","大雾","大中华","顶天立地","定国安邦","对此","而今","飞沙走石","高尚情操","海枯石烂","花见","花开","江水","交易","经天纬地","竟是","立于","连绵不绝","朦胧","迷天","年纪轻轻","女干","平地一声雷","七经八脉","商","少年","神州","手腕","滔滔","天崩地裂","天地间","天神","天佑","无数","心情","仰慕","一金甲","英雄","永不变心","之才","之智","只见","自古","自觉","凑字","棒球帽","便","店里","反复","纪念","一家","从此","凑够","抵","段话","复制粘贴","填写","无论","现金","以","字数","n","比如说","边","变化","层面","出去玩","出现","从小到大","第一个","疯","根本","坏孩子","降低","客观","来自","上升","事实上","玩起来","玩完","小事","心理","学习","一件","因素","糟糕","珍惜","状况","自私","大点","大约","单人床","低头","怪","经过","莫得","佩服","取","深深","适应期","天贵","退款","先说","由于","有着","枕到","执念","周","周前","emmmm","ps","单位地址","当地","开在","考虑一下","能带","能够","其他人","清楚","我留","想吐槽","砸","招牌","重复","包少件","不接","不收","第三方","丢失","动静","搞笑","接","没到","没收","赔钱","评","亲","人买","慎重","送错","套路","消息","也代","安安静静","玻璃墙","不舍","不再","沉淀","出入","触摸","春天","地看","店面","独自","反反复复","浮光","故事","拐到","逛","好棒","好贵","何种","衡山路","划过","进入","旧货店","绝版","亮光","流连","落幕","买不起","每一分","目力","那家店","凝结","铺满","亲笔签名","认认真真","设计师","时光","似","算了吧","随性","逃出来","透出","未来","温色","梧桐","夕阳","细细","先生","闲逛","行道","沿路","眼光","眼中","一家家","一间","移步","意义","在乎","主角","主评"],"freq":[104.385755464983,99.7198139736943,88.8559194654272,67.8576691567892,54.9782180422107,50.8077044311208,49.755496347643,48.5106602975636,45.9927647926159,43.6467313334373,43.3893793174481,42.7283074460369,39.4219713244699,35.4032530348325,31.4983992797936,31.1464942654172,30.8964761281649,30.8540550831858,30.4052571979779,30.2872789090816,29.0796806674795,28.0452944894195,27.3670435513641,26.8063102226875,25.7373434343118,25.1899555659082,24.8656707339564,23.5894260023004,23.5113230772551,23.2388015229134,22.4069322069421,22.1802221502752,21.8205538823494,21.0360326099315,20.6965743378095,19.7486718753636,19.5852803386051,19.0447217032285,18.8588905946194,18.1571991359135,18.0022759963904,17.5074860246723,16.8595220167607,16.7946494946901,16.0595506035958,15.9110138136071,15.7789079617999,15.6123822549124,15.3575304529564,15.1970288553315,15.1907366953223,15.1869949540532,14.7525809855828,14.559489975549,14.5493845742317,14.5387437901165,14.4301168336076,14.192420071861,14.1263726977806,13.7668920881572,13.4540798313934,13.0821458614133,13.0399720009459,12.9850420463479,12.3301182787906,12.1920341943026,11.7750952652281,11.3827119769039,11.2792333134355,11.1204650275847,10.9109073692366,10.8601881998171,10.8545560822973,10.7357740542511,10.6254386272832,10.5332157131725,10.4692794421811,10.4311064254931,10.189890458961,10.1228783251865,10.0358780548743,10.0055542707184,10.0041274876872,9.84645515051204,9.77027072037964,9.70105913784998,9.63846899636374,9.48700914614294,9.42263421611838,9.30919390281175,9.25682263526914,9.15502285066971,9.11151106567363,9.08308141688652,9.01495958585393,8.97758651158371,8.92038357216732,8.90228484292332,8.87432468030608,8.77438026475937,8.52904970553236,8.488503040832,8.47654953452034,8.46344190590003,8.43958002618514,8.31076480819107,8.21712637468843,8.21213681451671,8.14781883520551,8.13196947556826,8.12727039320733,7.97310905933918,7.95377209099669,7.86975510729849,7.83163091306292,7.80440161030972,7.77071087358697,7.74276637679277,7.72060024337872,7.68269609456917,7.5919523009099,7.56122635426285,7.53640605741744,7.50980280216821,7.48040190178327,7.38782764280137,7.23747086383769,7.13346358885125,7.08761852862719,6.95918700769723,6.88597940129337,6.82256820258063,6.62094671267198,6.61015765869222,6.55283846639026,6.54504402993045,6.53118539844138,6.51221852405292,6.49155566129105,6.46251627035727,6.42815714017225,6.42367929031455,6.37606871089263,6.35639164319405,6.31639372415204,6.27806579747957,6.26453629210629,6.24847733864832,6.20508517346454,6.18279390886016,6.1436023144785,6.1355747630525,6.03210069097582,5.8954794217401,5.85458325951767,5.83832732599834,5.76751376630448,5.71664856950594,5.70791044962529,5.70621256469174,5.68360827533067,5.6360481060971,5.60252278781508,5.52069894952616,5.51970278207023,5.4318525998769,5.42992950078605,5.39194934415513,5.38826208476263,5.36153534864822,5.35567163984425,5.3167257590546,5.31288718703738,5.30895139052374,5.25956366968419,5.18228500587422,5.17320780154987,5.15320654865231,5.14522807470404,5.12180631125671,5.11934277756529,5.10328113767465,5.08589938673913,5.08238024427914,5.06916722699497,5.0377298530448,5.00671897727601,4.94166451007,4.93430553821204,4.92790912814607,4.91120119963555,4.8314568784627,4.80030706945588,4.75616853156597,4.74756736170374,4.74102225153174,4.7305312675202,4.71742821484912,4.69493398195555,4.6889055423373,4.68640032129027,4.63172928636224,4.58642553322642,4.57854945546846,4.56718490343814,4.55626025662518,4.5555229443022,4.53166517018699,4.53074667729354,4.52488717121133,4.46751175337478,4.44869990812878,4.41330537290907,4.3733367411713,4.36758229813977,4.36695502280489,4.35981200462991,4.33755858823031,4.31911380832714,4.30668527694988,4.30322091419913,4.25850140878204,4.25677533294863,4.24106592194305,4.22964343220238,4.19514381396785,4.19359890790005,4.18465914910055,4.18155192533007,4.18052748133635,4.18036007580944,4.17144672809982,4.15959602716772,4.15256508088422,4.15130959234013,4.14220276607545,4.12126338589951,4.1064524291768,4.08375275275719,4.03442785820814,4.00788555527057,4.00679860984437,4.00538489830475,3.96579250573293,3.96551376131713,3.95528951278772,3.95260290813035,3.93019131834796,3.92883553268031,3.92644039060697,3.89734940823282,3.88529225501985,3.86833196159404,3.84995848230075,3.84819538806328,3.83020970423015,3.81964884266985,3.80695834127343,3.80008837952847,3.77675037823006,3.73482708646606,3.73482708646606,3.73482708646606,3.73482708646606,3.73482708646606,3.73482708646606,3.73013128013206,3.72839815155774,3.69041470913002,3.63183453647837,3.62902567378477,3.62145187924337,3.61886536897503,3.61690988344461,3.60822984916637,3.56626649555961,3.56227883936332,3.54615580188379,3.53705910008631,3.53387721989496,3.52938875634242,3.52369623048216,3.50262391725015,3.46520112920707,3.44921055070169,3.44248022088698,3.42359149592723,3.42188989414438,3.39045970052319,3.38825349618609,3.38039042796396,3.37143669336118,3.3554464146172,3.3206662327877,3.30582523901386,3.30465674198375,3.28363629890328,3.27890770401485,3.27320165382491,3.26555976383985,3.2557140582248,3.2269080916058,3.21407643387067,3.2126199742099,3.21079895060697,3.2096536765421,3.17120322905421,3.1565616608399,3.14067827287092,3.12382132670066,3.12111910311688,3.11838705879967,3.11554100120814,3.10256326089898,3.08782140714474,3.07558554144291,3.0713310720639,3.05611066419067,3.04981684042094,3.04762776324899,3.04640288752497,3.04635626692161,3.03926159849472,3.00992610469062,2.99996660505237,2.99240205596225,2.97122252219674,2.96066064033446,2.95867040018192,2.95798373197972,2.95618112632326,2.95344466125837,2.94799088225982,2.94698572003226,2.9417985788778,2.91754373051721,2.91714371990111,2.90206808088569,2.88941826888626,2.85396870235446,2.85218759204616,2.83419932024961,2.83157417078401,2.82354458015508,2.80948725592081,2.80650867420096,2.76675705439527,2.76078481651441,2.74391070990935,2.74235561996407,2.7331811338715,2.71493262113523,2.70781672261331,2.70039627616549,2.7003607499544,2.69653039110719,2.69056868494617,2.68782861492698,2.68690245133488,2.68522325274514,2.6628788955777,2.66123307555132,2.66025470200906,2.63096649934697,2.62962450089256,2.61529912283172,2.6122854236522,2.60712726142724,2.60632635465474,2.59786043831073,2.58152647328464,2.57658928696977,2.57577179333479,2.56634358226536,2.56154277283708,2.55783225948263,2.55389540161384,2.55033161341359,2.5402622246102,2.5253599967276,2.52187074585451,2.51047804733218,2.50708161941353,2.4968844075695,2.48988472431071,2.48988472431071,2.48988472431071,2.48988472431071,2.48166651435311,2.47218206449219,2.45169751013462,2.4452544923433,2.43807039335247,2.43637066606717,2.4339660039755,2.41992595331746,2.41640750674346,2.41442261883815,2.41385518064657,2.41186868507055,2.41094532446657,2.40821401410513,2.40099222252707,2.39426397569646,2.38562918290721,2.38431415971699,2.37567199157875,2.37501878726815,2.36312537695695,2.35722558371481,2.349310926139,2.34515124543365,2.33622636413579,2.33067501068654,2.32367889835597,2.30218096186078,2.2961893502804,2.28515951905255,2.2790653551829,2.2786299097447,2.27450266633531,2.25883566412406,2.24389966497844,2.23966403682652,2.2389258882627,2.23208991591306,2.22330696961042,2.22307003522936,2.21397429637534,2.20795366888515,2.20501455693425,2.20236477252096,2.19328421869355,2.18880081472257,2.18580161833623,2.18029163977535,2.17987059923272,2.17126108744653,2.14920563563714,2.14896254032715,2.14667290260097,2.12949040616467,2.12512875153589,2.11549107128364,2.10824661984912,2.10328526736774,2.10201041759731,2.09758590018661,2.09500283936888,2.0890841344978,2.08678698463837,2.08277569141385,2.08019973225952,2.06623056740542,2.06594427259962,2.0597370231171,2.05439993879868,2.04982701286018,2.04616206889847,2.04133382822337,2.04115421959931,2.03899627068914,2.03664540336195,2.03569511559231,2.03519393525101,2.03399632495585,2.03295209771166,2.02809445093706,2.01008398964179,1.99487754868345,1.99148723244713,1.972963762538,1.97070810395847,1.96917459021055,1.96518702778793,1.96430904903873,1.96189817688429,1.9615446094167,1.95934819853358,1.95823628289808,1.94374462358211,1.93930407106286,1.93769257318806,1.93614485496348,1.93314872709353,1.9297155097092,1.92932834364685,1.92156921039783,1.91460014353124,1.91291441620089,1.91263162156994,1.91131256527921,1.90589259160468,1.90548541055896,1.90172434734767,1.89175234896787,1.88272414673491,1.88236305343672,1.87762321017939,1.87453092917142,1.87407920361792,1.8731952206725,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.86741354323303,1.8645184512711,1.85986036283249,1.85940740644359,1.85884930699919,1.85739699882767,1.85494268220908,1.85483460835264,1.84094981023834,1.83990470638429,1.83044783956103,1.82997595680387,1.82279649471209,1.82250867849825,1.82165788427294,1.81513580152826,1.81513580152826,1.80049623734223,1.80014377405545,1.79680109646232,1.79650339410093,1.79618421865816,1.79449246726505,1.79029440112106,1.78417115925552,1.77557049782858,1.77343736147708,1.76746226513641,1.76271818598914,1.75876227953346,1.75163700561296,1.75059763969615,1.74996151695133,1.74928762570647,1.74830889981733,1.74429768326439,1.73810280337492,1.73660583380596,1.73557240861435,1.73378989319285,1.73288083697587,1.72999976000255,1.72929591930816,1.72533707657048,1.72278173401017,1.71216195256602,1.71195966123087,1.68526925251613,1.68231796082299,1.6784349948348,1.67783188803912,1.67619078145518,1.67344181513589,1.67068886361734,1.66609608973803,1.66585936386096,1.66411028521306,1.66005230478944,1.65992314954047,1.65909813049425,1.65739422931216,1.65622132371837,1.65481607383481,1.65297399431994,1.64993213727323,1.6458524867682,1.64307161635041,1.64102593988619,1.63845280764161,1.6367669016341,1.63204482769874,1.63155848254069,1.62589875538059,1.62157379505937,1.6210318972555,1.61593180922466,1.60884896067273,1.60128420556934,1.60097451615823,1.60064017991403,1.59731950534487,1.59432723606647,1.59218652057371,1.59155674559487,1.59059091387088,1.58785567088837,1.58411851769739,1.58118496488684,1.58118496488684,1.56966649792371,1.56798187451846,1.56759565036434,1.56197234719028,1.55987952291882,1.55868016922624,1.55594573138803,1.55205857913326,1.55165746796992,1.54699149201238,1.53882552989341,1.53511771116076,1.52542807124939,1.52471407328374,1.52471407328374,1.52471407328374,1.5239596940832,1.52349962137731,1.50801072873402,1.50588680447462,1.50509208895611,1.50351446885317,1.49785289833353,1.4962202140618,1.49438082767839,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.49393083458643,1.48934219612575,1.48402380392382,1.4766361054583,1.47124105759108,1.46973937696285,1.46880986039939,1.46824318168064,1.46742496412376,1.46310946426218,1.46310946426218,1.4596202803221,1.45879848146183,1.45540985572171,1.45484898250517,1.45300216439139,1.45210864122261,1.44914584073378,1.44699043198307,1.44547164880281,1.44388639990153,1.43867408415389,1.43245016391326,1.43059592061191,1.42732882793596,1.42491990938464,1.41983956030655,1.41376932408136,1.41177229007754,1.41177229007754,1.41128005402238,1.40659366275959,1.40403591229616,1.40065279688001,1.39859538506939,1.39694270535657,1.39502950971636,1.39220257115294,1.38741948588111,1.38532499322023,1.38353695432143,1.3747812373116,1.36899131159034,1.36833314269054,1.3656326845937,1.36522326091372,1.3599724022179,1.35899254206155,1.35530139847444,1.35530139847444,1.34507141331658,1.34454503816908,1.33815910939761,1.33248936497344,1.33166671744916,1.32965952926694,1.3293082966739,1.32913362322923,1.3216119623012,1.31668198941456,1.31240216887811,1.30397289661195,1.30317442161004,1.30146417101008,1.29866439348648,1.29800212302034,1.29591409943084,1.29369678945287,1.29369678945287,1.29270142457421,1.29236850147865,1.2919057154202,1.28561391521955,1.27615722426212,1.27557433514349,1.27059506106978,1.26270316628053,1.26073705486581,1.25451650285355,1.25383651823271,1.25359683736677,1.25168449140339,1.25042688549725,1.25042688549725,1.24978858848907,1.24957167483395,1.2492654431242,1.2466361224638,1.24524909556069,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.24494236215535,1.2414827234713,1.23913270717663,1.23870919070891,1.23752662054947,1.23698143511556,1.23698143511556,1.23521002100195,1.2246668199407,1.21963187867896,1.21628981426859,1.21554162159782,1.20789995234453,1.2047123541995,1.2047123541995,1.2047123541995,1.20372163680295,1.19938567565389,1.19892046788123,1.19892046788123,1.19797368763939,1.1922024595119,1.18684585742112,1.18588872366513,1.18398145010393,1.18210503271884,1.18075500624667,1.17647690839795,1.17543135385024,1.17344805328076,1.17096246819289,1.16738145666916,1.16515958387579,1.16384714544157,1.16296796300057,1.15837125168437,1.15829893433333,1.15508641915435,1.15423421149978,1.15396461171177,1.15382243604158,1.15156327974952,1.14989798200267,1.14972589744777,1.14961160358942,1.14917756506648,1.14917756506648,1.14864365750885,1.14527062443317,1.14138584279643,1.14032851051524,1.1395959589877,1.13690050744999,1.13335308583228,1.1326296683136,1.13010147708969,1.12941783206203,1.12941783206203,1.12941783206203,1.12545271288571,1.12537842614197,1.12508255359549,1.12154865997049,1.11866147175668,1.1164938596198,1.11185453173448,1.10766406595608,1.10254461987738,1.1016464017662,1.10040489713468,1.09992806443906,1.09804511450475,1.09781646391755,1.09650557910001,1.08851928025614,1.08846953822066,1.08631650311686,1.08597868467503,1.08597868467503,1.0858788299511,1.08466065942252,1.08265994111699,1.08177010357027,1.08073602895591,1.07563603053527,1.07558590059671,1.0749409412952,1.0706889833277,1.06928846941425,1.0686864798341,1.06853455382489,1.06719413075347,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06709345327602,1.06469576679298,1.06354651058645,1.06321932743887,1.06211964452228,1.05942704060299,1.05725358148693,1.05412330992456,1.05411783903277,1.05406126412427,1.05284315461898,1.05246598692136,1.0517850080398,1.05145795171823,1.05130145448384,1.04874512977189,1.04757596017348,1.04253953728803,1.04253953728803,1.03957777723891,1.0378184768902,1.03501607909305,1.03211303902978,1.03150201935703,1.02622588754149,1.02613515728521,1.02532649853193,1.02400550106957,1.02308388949306,1.02103987258019,1.0207749307151,1.02012515884942,1.01809042521549,1.01647604885583,1.01305287616616,1.01244488296589,1.01208551075737,1.01187135808899,1.007878920332,1.00691503175017,1.00625546643571,1.00530598238488,1.00457638097627,1.00164564128316,1.00040139724989,1.0003415083978,0.998373996422982,0.99806094453162,0.995958700752046,0.994223482813306,0.992518700902997,0.990259425465939,0.989117637073762,0.988652306870355,0.988240603054277,0.982127625524544,0.978828787787093,0.977945733254504,0.976754353178644,0.974488319546757,0.974395489770738,0.974335266335876,0.971814722201142,0.970780297093718,0.970574403904118,0.969012263456009,0.967162292234507,0.96601269891263,0.965461531063901,0.963958297186431,0.96395671319002,0.963326974405849,0.962513870602849,0.962270163150519,0.958420281488644,0.958293918113238,0.956207601598089,0.954024496117538,0.951937887023711,0.948710978932106,0.944801455667275,0.944081305311411,0.943992162868925,0.940487135296117,0.937622373723508,0.935331630372282,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.933706771616516,0.929275156824845,0.924100626880816,0.92406913532348,0.919887827018848,0.912854704069554,0.912764632355184,0.912764632355184,0.911323354146604,0.911323354146604,0.910880943457176,0.910880943457176,0.910880943457176,0.910880943457176,0.909059305002917,0.907567900764132,0.906229539381642,0.90553300331037,0.90436399628324,0.904161019289348,0.903534265649624,0.903464131610321,0.902937072194451,0.901633879203969,0.901632828065434,0.900886291777804,0.899881295303422,0.888938697995097,0.884296928949667,0.882654272115704,0.878780637846065,0.876972684541247,0.875510229958195,0.874755727819936,0.872642182544847,0.872294917963939,0.864646203647875,0.858828143130502,0.857880831512987,0.857443287041233,0.856795287883782,0.855771756366283,0.850259839608963,0.847846689245414,0.847143222165853,0.844910899236812,0.839262248215549,0.835072224631727,0.834643089969594,0.833071423685089,0.831081597363203,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829961574770236,0.829292813751841,0.827811933727284,0.827628812781273,0.821394786954204,0.81650324160773,0.816292562536813,0.815900507442805,0.815690656489244,0.81535511940307,0.81246673327423,0.809660575712001,0.808425395581243,0.808178461244602,0.806966896248729,0.80682633192877,0.805509321734807,0.804209680742151,0.803646575344392,0.802830667347288,0.802333243938149,0.8020119292648,0.800464236740864,0.799904448434087,0.798381570940401,0.793257289968642,0.792866793317416,0.792506749955391,0.792330048338901,0.792059258848697,0.791980679581152,0.79075463292564,0.790178776277831,0.789562618158866,0.787520144400697,0.787415367402661,0.785552240749572,0.781931081648312,0.779978811917906,0.778666952539661,0.778457344050086,0.777391494795943,0.774457941985392,0.772658271070317,0.762357036641871,0.762231849846611,0.758666092971928,0.758323401527363,0.7549424235534,0.753677422316081,0.753677422316081,0.753677422316081,0.753677422316081,0.752945221374687,0.752183543474267,0.751421464789437,0.751308383936916,0.749885177693994,0.747518078224659,0.7470215752902,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746965417293213,0.746397871623603,0.742188861069334,0.741774823142585,0.738713814409124,0.738243277162267,0.735151350826374,0.733130873443774,0.730015215905252,0.729341858389384,0.729038414750558,0.72871394101059,0.72773848838341,0.727487313643037,0.718720438584929,0.717883442223768,0.717475017327,0.714328938538693,0.714328938538693,0.713804430113075,0.713792655551802,0.713316525512861,0.712402017146819,0.712402017146819,0.712390426041606,0.711497458686157,0.708874953124861,0.708212690531147,0.705886145038769,0.699313014905747,0.699163419847924,0.697895046330239,0.695802057252501,0.693785239695247,0.692544121198476,0.690513200021941,0.689700890480967,0.689345425531806,0.685439787734198,0.684893000872046,0.683365137829245,0.681479234261157,0.680972516390342,0.679564966749188,0.67937793126586,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.679059470266557,0.677650699237218,0.677439986955117,0.675716563482547,0.675650097010005,0.675489134008392,0.675281291197927,0.674276196038772,0.674001849617723,0.674001849617723,0.673805438531339,0.672142628695719,0.669402820389312,0.666933408297511,0.666585737948576,0.665850811439555,0.663083399355938,0.659451152782095,0.657793047209801,0.657204341932647,0.657204341932647,0.652528397239516,0.651915681933729,0.647532890382231,0.646848394726436,0.64538161832116,0.642735932498019,0.642289066323685,0.63945692825267,0.639012720771938,0.636309115065756,0.635297530534892,0.634915970456493,0.634625258015808,0.63229071328422,0.631919710736397,0.631812751523915,0.629220223688669,0.629080445387124,0.628936186010679,0.627485199452065,0.62394411701329,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622471181077677,0.622411664052554,0.62233227480969,0.621179807634117,0.616790721549038,0.616594071664856,0.615881406010554,0.613273884703292,0.612471397277858,0.610699895841285,0.61050074369919,0.609115899105815,0.607513311334291,0.601860818401477,0.601537758380864,0.601537758380864,0.601364197368335,0.600778072419633,0.600728422159933,0.600018966129306,0.599352583797595,0.598676369626866,0.598288590343645,0.597484614742154,0.596211444292668,0.595736878450302,0.595736878450302,0.594116847023385,0.592944361832566,0.592481485671885,0.592232543871182,0.592131976163975,0.590210512275397,0.590098392568161,0.588688441102367,0.588688441102367,0.587061098667045,0.58551320353463,0.585092174690051,0.581821307425894,0.580843456489044,0.580430423328561,0.578764093207137,0.577774017342437,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.574588782533241,0.572029021844708,0.565166170214036,0.564492031357813,0.563747484749595,0.563747484749595,0.560413485941829,0.558098610993863,0.557422349372551,0.556021086553615,0.553307716513491,0.553095197639272,0.552156963302882,0.550881055402899,0.55059119313024,0.550545295865189,0.548701074651636,0.542989342337515,0.538387737741434,0.538387737741434,0.535720520105383,0.535424934111885,0.535281613992526,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533546726638009,0.533336198473737,0.531578866894237,0.528590099906544,0.525719186305083,0.525719186305083,0.525719186305083,0.524372564885943,0.523398033292961,0.521267063257965,0.521068814534901,0.520514305211197,0.519362711426965,0.519088214408438,0.519088214408438,0.519088214408438,0.519088214408438,0.517558462847843,0.516365253320946,0.516130842641817,0.514995527668572,0.513705950473619,0.512002750534787,0.511559841581037,0.505000937345063,0.50450098013065,0.502677626555011,0.501963480916458,0.500839262594137,0.500054239818735,0.499085096373244,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497976944862142,0.497189371722959,0.496914529615871,0.49641853548773,0.49535869827282,0.494954323825251,0.494120301527138,0.492836872172522,0.49273621104667,0.490101733805192,0.489825542385542,0.487578088867423,0.487151359104269,0.486968524975491,0.48403621374087,0.483955729820661,0.483006349456315,0.481663487202925,0.480078509332297,0.478657784360092,0.477435719917131,0.475968943511856,0.475968943511856,0.474852290522262,0.473559228269585,0.473279853435518,0.473279853435518,0.472275743074532,0.46957874021217,0.46939276731826,0.467345309818771,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466853385808258,0.466744855113227,0.465616230976947,0.459010781224163,0.455976143379081,0.455976143379081,0.454249369818355,0.453783950382066,0.452204044945533,0.451304256664131,0.450985345803285,0.450776415428267,0.450102592747176,0.449030911491417,0.447635116366049,0.447635116366049,0.444708271374425,0.444656996351782,0.443908242398951,0.443079303347412,0.441364600161083,0.44119385924809,0.440848606875239,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439391421937184,0.439021351647937,0.43893702951363,0.437649409924037,0.435599131536809,0.435446900724683,0.434684518716847,0.434269110074555,0.43369644751182,0.431839568101329,0.431125372562718,0.431125372562718,0.428748762675284,0.428748762675284,0.428748762675284,0.428081132254713,0.427104907211547,0.426837381310407,0.425189882567783,0.423845791726743,0.42261829960822,0.416808961832416,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414980787385118,0.414086288115517,0.414086288115517,0.414086288115517,0.412237508702641,0.411750862811477,0.411400124594194,0.411223928596944,0.410848486424638,0.409781876212352,0.405380329007979,0.404422658740238,0.403765090428764,0.402988832740319,0.402425244971735,0.402425244971735,0.402425244971735,0.402425244971735,0.402425244971735,0.402425244971735,0.402425244971735,0.400513660554606,0.400513660554606,0.393891817659574,0.393801614631525,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.393139693312217,0.389277801527049,0.387684177463299,0.386361422737869,0.386199106708141,0.386199106708141,0.386199106708141,0.386199106708141,0.386125754551122,0.386022650210787,0.38591633041306,0.384984165363753,0.383476752281527,0.383442335627001,0.383442335627001,0.383442335627001,0.381294269608385,0.379895088966319,0.378938491203182,0.377946783811638,0.3774712117767,0.37531423342369,0.374649659763101,0.373893101274051,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.373482708646606,0.372608522307855,0.372608522307855,0.368871811008994,0.368871811008994,0.368806563450097,0.368721703996722,0.368198487375534,0.367818067912922,0.367466088900565,0.364589687537958,0.364589687537958,0.364589687537958,0.364158620940848,0.362655095965968,0.362598354304819,0.361428821303157,0.360753291789238,0.360289398915716,0.356658262756431,0.356658262756431,0.356658262756431,0.356658262756431,0.356658262756431,0.356658262756431,0.355937741013488,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355697817758673,0.355351920970934,0.351732981985032,0.351374436641521,0.351207671365469,0.349581709923962,0.347560331494801,0.347425775485215,0.346614438115589,0.345686299065715,0.343502139308728,0.343490029025123,0.341759593140414,0.339788900494081,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.339529735133279,0.337901184380225,0.337675544779005,0.336851609717918,0.336729755272406,0.331459581148639,0.329626471348421,0.328660289009667,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32476757273618,0.32409381267867,0.323766445191115,0.323662769429136,0.321627769605604,0.321484488378671,0.321271348123217,0.320001719084242,0.319794232829417,0.319183300365356,0.317857624380091,0.316236992977369,0.31614535664211,0.315755342613111,0.315317317468087,0.315317317468087,0.314623538931566,0.314304732957025,0.312976295272238,0.312606721374312,0.311817531895387,0.311582290694051,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.311235590538839,0.310424784250967,0.307528228971107,0.306556268702551,0.306539373895789,0.305349947920642,0.304261269413263,0.304054539407563,0.303951667913552,0.301051622995204,0.299541251112104,0.298832849335757,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.298786166917285,0.292120805497153,0.289215407462613,0.287732638168184,0.287732638168184,0.287581751720251,0.287581751720251,0.287581751720251,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.28729439126662,0.284558254206938,0.284558254206938,0.284558254206938,0.283311591771492,0.281928840804149,0.280348949715584,0.27971113968515,0.279518121853056,0.278711174686275,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.276653858256745,0.274222838384179,0.273666628538107,0.273666628538107,0.271060279694887,0.270563832296179,0.268927407155379,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.266773363319005,0.265100359210448,0.26353082748114,0.263102691243352,0.262712408762255,0.258170804433297,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.257574281825246,0.256453058193207,0.253656136053276,0.253208616031598,0.251986816077913,0.251042510855434,0.250913907555402,0.250063921593521,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.248988472431071,0.246480678681888,0.246252335371389,0.246252335371389,0.246252335371389,0.246252335371389,0.246252335371389,0.245030289763396,0.243851577377029,0.242759129855342,0.242163463090778,0.24122891739151,0.240970409438096,0.240970409438096,0.240970409438096,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240956586223617,0.240460186904792,0.237177744733026,0.236542584090561,0.235497812265561,0.235224482533322,0.234534426402668,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.233426692904129,0.232507717920101,0.23182787079168,0.231530655572716,0.229835513013296,0.229835513013296,0.229835513013296,0.22816521859839,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.226353156755519,0.225883566412406,0.22154723267674,0.219880651743366,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219695710968592,0.219110004446975,0.217562742900936,0.217195736935006,0.217017108665377,0.21684822375591,0.216511715157453,0.216008874984541,0.215844296794077,0.214293357420184,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.213418690655204,0.21261191151156,0.211439547913,0.210412793603722,0.210412793603722,0.210197207633767,0.207490393692559,0.207490393692559,0.207490393692559,0.207490393692559,0.207490393692559,0.207490393692559,0.207490393692559,0.207490393692559,0.207490393692559,0.207490393692559,0.207189754019655,0.206105742625145,0.205741483716206,0.202769899151602,0.201882545214382,0.201882545214382,0.201882545214382,0.201882545214382,0.201882545214382,0.201882545214382,0.201882545214382,0.201627902119027,0.201069889063439,0.199697714184749,0.199190777944857,0.198861980897651,0.197917029618489,0.196569846656109,0.196569846656109,0.196569846656109,0.195724086427906,0.193027774934238,0.191529594177747,0.191529594177747,0.191529594177747,0.189105168934991,0.188960291133455,0.18851373541787,0.186741354323303,0.186741354323303,0.186741354323303,0.186741354323303,0.186741354323303,0.186741354323303,0.186741354323303,0.186741354323303,0.186741354323303,0.185444665222049,0.185386874501125,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184403281725048,0.184144211749244,0.183680020645872,0.18318228947417,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.182186687144686,0.180637243402217,0.180637243402217,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.178329131378215,0.177848908879336,0.177848908879336,0.177848908879336,0.177848908879336,0.177848908879336,0.177848908879336,0.177848908879336,0.177848908879336,0.173712887742608,0.173712887742608,0.173712887742608,0.173712887742608,0.173712887742608,0.173712887742608,0.173712887742608,0.173504768403732,0.173504768403732,0.171953569478576,0.170369808565289,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.169764867566639,0.168321583739704,0.16758579477901,0.16758579477901,0.167395857252051,0.16606863070969,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.165992314954047,0.16238378636809,0.16238378636809,0.16238378636809,0.16238378636809,0.16238378636809,0.16238378636809,0.16238378636809,0.162117392162014,0.16204606531715,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.158928812190045,0.155617795269419,0.155617795269419,0.155617795269419,0.155617795269419,0.155121019790776,0.15368526761517,0.15306668387156,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152441921896574,0.152352382029913,0.151546178030922,0.149796470357701,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.149393083458643,0.146532054780115,0.145041828600624,0.145041828600624,0.145041828600624,0.145041828600624,0.14364719563331,0.14364719563331,0.14364719563331,0.14364719563331,0.14364719563331,0.14364719563331,0.14364719563331,0.14364719563331,0.141234509997101,0.140936871187399,0.140936871187399,0.140936871187399,0.140936871187399,0.140936871187399,0.139949600929426,0.139619704166956,0.139619704166956,0.139619704166956,0.138862848204348,0.138326929128373,0.138326929128373,0.138326929128373,0.138326929128373,0.138326929128373,0.138326929128373,0.138326929128373,0.138153442570177,0.136989525749905,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135811894053311,0.135530139847444,0.135530139847444,0.135530139847444,0.135530139847444,0.135530139847444,0.135530139847444,0.135530139847444,0.135530139847444,0.135292910379973,0.133568553363268,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.133386681659502,0.132137422249155,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.131046564437406,0.130446918010145,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128787140912623,0.128016639862963,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.126604308015799,0.124494236215535,0.124494236215535,0.124494236215535,0.124494236215535,0.124494236215535,0.124494236215535,0.124494236215535,0.124494236215535,0.124494236215535,0.124494236215535,0.124494236215535,0.123216330096816,0.123126167685694,0.123126167685694,0.123126167685694,0.123126167685694,0.122453347097248,0.122453347097248,0.122453347097248,0.122453347097248,0.121939892307796,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.120478293111809,0.118565939252891,0.118565939252891,0.118565939252891,0.118565939252891,0.118565939252891,0.118565939252891,0.118565939252891,0.116713346452065,0.116713346452065,0.116713346452065,0.116713346452065,0.116713346452065,0.116713346452065,0.116713346452065,0.115241643403578,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.114917756506648,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.11317657837776,0.111487375715405,0.111487375715405,0.111487375715405,0.111487375715405,0.111487375715405,0.111487375715405,0.110968043305512,0.109847855484296,0.109847855484296,0.109847855484296,0.109847855484296,0.109847855484296,0.109847855484296,0.109847855484296,0.109847855484296,0.109847855484296,0.108424111877955,0.108424111877955,0.108424111877955,0.108424111877955,0.108424111877955,0.108424111877955,0.108424111877955,0.108424111877955,0.108424111877955,0.108424111877955,0.108424111877955,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.108255857578726,0.106709345327602,0.106709345327602,0.106709345327602,0.106709345327602,0.106709345327602,0.106709345327602,0.106709345327602,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.105206396801861,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.10374519684628,0.103244164124623,0.102324029766194,0.100941272607191,0.100051688383756,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0995953889724284,0.0962718861425873,0.09525440390291,0.0945525844674953,0.0945525844674953,0.0945525844674953,0.0945525844674953,0.0945525844674953,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.0933706771616516,0.091840010322936,0.091840010322936,0.091840010322936,0.0899958334088208,0.0899958334088208,0.0899958334088208,0.0899958334088208,0.0899958334088208,0.0899958334088208,0.0899958334088208,0.0899958334088208,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0889244544396682,0.0839286985722711,0.0839286985722711,0.0839286985722711,0.0839286985722711,0.0839286985722711,0.0839286985722711,0.0839286985722711,0.0839286985722711,0.0829961574770237,0.0829961574770237,0.0829961574770237,0.0829961574770237,0.0829961574770237,0.0829961574770237,0.0829961574770237,0.0829961574770237,0.0829961574770237,0.082084111790463,0.082084111790463,0.082084111790463,0.082084111790463,0.082084111790463,0.082084111790463,0.082084111790463,0.082084111790463,0.082084111790463,0.082084111790463,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0811918931840449,0.0782162740621165,0.0782162740621165,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0778088976347097,0.0746965417293213,0.0746965417293213,0.0746965417293213,0.0746965417293213,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0725209143003119,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0698098520834778,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0655232822187029,0.0650061245440135,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0633021540078994,0.0622471181077677,0.061226673548624,0.061226673548624,0.061226673548624,0.061226673548624,0.061226673548624,0.0572356435207487,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0497976944862142,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0410420558952315,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0405959465920224,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0391081370310583,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.0324767572736179,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0.030613336774312,0],"fontFamily":"Segoe UI","fontWeight":"bold","color":"random-dark","minSize":0,"weightFactor":1.72437320780211,"backgroundColor":"white","gridSize":0,"minRotation":-0.785398163397448,"maxRotation":0.785398163397448,"shuffle":true,"rotateRatio":0.4,"shape":"circle","ellipticity":0.65,"figBase64":null,"hover":null},"evals":[],"jsHooks":{"render":[{"code":"function(el,x){\n                        console.log(123);\n                        if(!iii){\n                          window.location.reload();\n                          iii = False;\n\n                        }\n  }","data":null}]}}</script>
+<script type="application/htmlwidget-sizing" data-for="htmlwidget-d8fcfaab778af03b093a">{"viewer":{"width":450,"height":350,"padding":0,"fill":true},"browser":{"width":960,"height":500,"padding":0,"fill":true}}</script>
+</body>
+</html>
